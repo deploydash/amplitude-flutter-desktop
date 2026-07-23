@@ -1,8 +1,7 @@
-import 'dart:async';
-
 // ignore_for_file: depend_on_referenced_packages
 import 'package:amplitude_flutter/amplitude.dart';
 import 'package:amplitude_flutter/autocapture/autocapture.dart';
+import 'package:amplitude_flutter/autocapture/element_interactions.dart';
 import 'package:amplitude_flutter/autocapture/page_views.dart';
 import 'package:amplitude_flutter/configuration.dart';
 import 'package:amplitude_flutter/constants.dart';
@@ -10,15 +9,12 @@ import 'package:amplitude_flutter/observers/amplitude_navigator_observer.dart';
 import 'package:flutter/material.dart';
 
 import 'app_state.dart';
-import 'device_id_form.dart';
-import 'event_form.dart';
-import 'group_form.dart';
-import 'group_identify_form.dart';
-import 'identify_form.dart';
-import 'reset.dart';
-import 'revenue_form.dart';
-import 'session_id.dart';
-import 'user_id_form.dart';
+import 'screens/downloads_screen.dart';
+import 'screens/forms_screen.dart';
+import 'screens/home_screen.dart';
+import 'screens/interactions_screen.dart';
+import 'screens/manual_api_screen.dart';
+import 'screens/navigation_lab_screen.dart';
 
 class MyApp extends StatefulWidget {
   const MyApp(this.apiKey);
@@ -30,7 +26,7 @@ class MyApp extends StatefulWidget {
 }
 
 class _MyAppState extends State<MyApp> {
-  String _message = '';
+  final ValueNotifier<String> _message = ValueNotifier('');
 
   late Amplitude analytics;
   late final AmplitudeNavigatorObserver _navigatorObserver;
@@ -47,130 +43,74 @@ class _MyAppState extends State<MyApp> {
     analytics = Amplitude(Configuration(
         apiKey: widget.apiKey,
         logLevel: LogLevel.debug,
-        // Screen views are captured by the AmplitudeNavigatorObserver on every
-        // platform. On web we disable pageViews so a navigation is reported once
-        // (as `[Amplitude] Screen Viewed`) instead of also as
-        // `[Amplitude] Page Viewed`.
+        // Autocapture testbed: every option enabled. Note that with both
+        // `pageViews` and `screenViews` on, a URL-changing navigation on web is
+        // deliberately reported twice (`[Amplitude] Page Viewed` from the
+        // Browser SDK and `[Amplitude] Screen Viewed` from the navigator
+        // observer) so both capture paths can be verified.
         autocapture: const AutocaptureOptions(
-          screenViews: true,
-          pageViews: PageViewsDisabled(),
+          sessions: true,
           appLifecycles: true,
           deepLinks: true,
+          screenViews: true,
+          formInteractions: true,
+          fileDownloads: true,
+          pageUrlEnrichment: true,
+          pageViews: PageViewsOptions(),
+          elementInteractions: ElementInteractionsOptions(
+            // The Browser SDK's default allowlist plus '[role="button"]':
+            // Flutter's semantics tree renders buttons as role="button"
+            // elements (not <button> tags), so without the extra selector
+            // button taps would not be click-tracked on web.
+            cssSelectorAllowlist: [
+              'a',
+              'button',
+              'input',
+              'select',
+              'textarea',
+              'label',
+              '[role="button"]',
+            ],
+          ),
         )));
     _navigatorObserver = AmplitudeNavigatorObserver(analytics);
     initAnalytics();
   }
 
-  Future<void> _flushEvents() async {
-    analytics.flush();
-
-    setMessage('Events flushed.');
+  @override
+  void dispose() {
+    _message.dispose();
+    super.dispose();
   }
 
   void setMessage(String message) {
-    setState(() {
-      _message = message;
-    });
+    _message.value = message;
   }
 
   @override
   Widget build(BuildContext context) {
-    const Widget divider = Divider();
-
     return AppState(
       analytics: analytics,
       setMessage: setMessage,
+      message: _message,
       child: MaterialApp(
         theme: ThemeData(
             inputDecorationTheme: InputDecorationTheme(
                 contentPadding: const EdgeInsets.all(8), filled: true)),
         navigatorObservers: [_navigatorObserver],
         routes: {
-          '/details': (context) => const DetailsScreen(),
+          '/': (context) => const HomeScreen(),
+          '/manual': (context) => const ManualApiScreen(),
+          '/interactions': (context) => const InteractionsScreen(),
+          '/forms': (context) => const FormsScreen(),
+          '/downloads': (context) => const DownloadsScreen(),
+          '/navigation': (context) => const NavigationLabScreen(),
+          '/navigation/details-a': (context) =>
+              const NavigationDetailsScreen(label: 'A'),
+          '/navigation/details-b': (context) =>
+              const NavigationDetailsScreen(label: 'B'),
         },
-        home: Scaffold(
-          appBar: AppBar(
-            title: const Text('Amplitude Flutter'),
-          ),
-          body: Padding(
-            padding: const EdgeInsets.all(10.0),
-            child: ListView(
-              children: <Widget>[
-                DeviceIdForm(),
-                divider,
-                UserIdForm(),
-                divider,
-                ResetForm(),
-                divider,
-                SessionIdForm(),
-                divider,
-                EventForm(),
-                divider,
-                IdentifyForm(),
-                divider,
-                GroupForm(),
-                divider,
-                GroupIdentifyForm(),
-                divider,
-                RevenueForm(),
-                divider,
-                // FlushThresholdForm(),
-                // divider,
-                Row(
-                  children: [
-                    Expanded(
-                      child: ElevatedButton(
-                        child: const Text('Opt Out'),
-                        onPressed: () {
-                          analytics.setOptOut(true);
-                          setMessage('Opted out — tracking disabled.');
-                        },
-                      ),
-                    ),
-                    const SizedBox(width: 8),
-                    Expanded(
-                      child: ElevatedButton(
-                        child: const Text('Opt In'),
-                        onPressed: () {
-                          analytics.setOptOut(false);
-                          setMessage('Opted in — tracking enabled.');
-                        },
-                      ),
-                    ),
-                  ],
-                ),
-                divider,
-                ElevatedButton(
-                  child: const Text('Flush Events'),
-                  onPressed: _flushEvents,
-                ),
-                Builder(
-                  builder: (context) => ElevatedButton(
-                    child: const Text('Open Details Screen'),
-                    onPressed: () => Navigator.of(context).pushNamed('/details'),
-                  ),
-                ),
-                Text(_message, style: Theme.of(context).textTheme.bodyLarge)
-              ],
-            ),
-          ),
-        ),
       ),
-    );
-  }
-}
-
-/// A simple second screen to demonstrate screen view autocapture. Navigating to
-/// the `/details` route emits an `[Amplitude] Screen Viewed` event through the
-/// [AmplitudeNavigatorObserver].
-class DetailsScreen extends StatelessWidget {
-  const DetailsScreen({super.key});
-
-  @override
-  Widget build(BuildContext context) {
-    return Scaffold(
-      appBar: AppBar(title: const Text('Details')),
-      body: const Center(child: Text('Details screen')),
     );
   }
 }
