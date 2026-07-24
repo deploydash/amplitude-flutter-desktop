@@ -43,6 +43,7 @@ class _MyAppState extends State<MyApp> {
     analytics = Amplitude(Configuration(
         apiKey: widget.apiKey,
         logLevel: LogLevel.debug,
+        flushIntervalMillis: 1000,
         // Autocapture testbed: every option enabled. Note that with both
         // `pageViews` and `screenViews` on, a URL-changing navigation on web is
         // deliberately reported twice (`[Amplitude] Page Viewed` from the
@@ -58,10 +59,13 @@ class _MyAppState extends State<MyApp> {
           pageUrlEnrichment: true,
           pageViews: PageViewsOptions(),
           elementInteractions: ElementInteractionsOptions(
-            // The Browser SDK's default allowlist plus '[role="button"]':
-            // Flutter's semantics tree renders buttons as role="button"
-            // elements (not <button> tags), so without the extra selector
-            // button taps would not be click-tracked on web.
+            // The Browser SDK's default allowlist plus role selectors:
+            // Flutter's semantics tree renders buttons/checkboxes/switches as
+            // role="..." elements (not <button>/<input> tags), so without the
+            // extra selectors their taps would not be click-tracked on web.
+            // Note these controls can only produce Element Clicked — they are
+            // not real <input>s, so no native change event (Element Changed)
+            // ever fires for them.
             cssSelectorAllowlist: [
               'a',
               'button',
@@ -70,6 +74,8 @@ class _MyAppState extends State<MyApp> {
               'textarea',
               'label',
               '[role="button"]',
+              '[role="checkbox"]',
+              '[role="switch"]',
             ],
           ),
         )));

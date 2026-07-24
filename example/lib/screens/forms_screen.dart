@@ -2,15 +2,18 @@ import 'package:flutter/material.dart';
 
 /// Form-interaction autocapture playground (web only).
 ///
-/// With `formInteractions` enabled, the Browser SDK emits
-/// `[Amplitude] Form Started` on the first change inside a DOM `<form>`.
-/// Flutter web renders an [AutofillGroup] with autofill-hinted text fields as a
-/// real `<form>` with `<input>` children (when semantics are enabled), which is
-/// what makes capture possible under CanvasKit.
+/// **Known limitation (verified live):** the Browser SDK's `formInteractions`
+/// plugin only attaches listeners to DOM `<form>` elements, and Flutter web
+/// (CanvasKit + semantics) renders text fields as bare `<input>`s with no
+/// `<form>` wrapper — even inside an [AutofillGroup]. So
+/// `[Amplitude] Form Started` / `[Amplitude] Form Submitted` do NOT fire on
+/// Flutter web today.
 ///
-/// Note: `[Amplitude] Form Submitted` listens for the DOM `submit` event, which
-/// a Flutter button tap does not dispatch — so on Flutter web expect
-/// `Form Started` but not `Form Submitted`.
+/// The fields still exercise `[Amplitude] Element Changed` (the `<input>`s are
+/// real DOM elements), which is why this screen is kept: it documents the gap
+/// and proves the inputs are otherwise visible to autocapture. If a future
+/// engine wraps autofill groups in a real `<form>`, this screen starts
+/// producing form events with no changes.
 class FormsScreen extends StatefulWidget {
   const FormsScreen({super.key});
 
