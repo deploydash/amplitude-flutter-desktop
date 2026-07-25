@@ -2,6 +2,7 @@ package com.amplitude.amplitude_flutter
 
 import android.content.Context
 import android.os.Looper
+import com.amplitude.android.AutocaptureOption
 import io.flutter.embedding.engine.plugins.FlutterPlugin
 import io.flutter.plugin.common.MethodCall
 import io.flutter.plugin.common.MethodChannel
@@ -10,6 +11,7 @@ import io.mockk.mockk
 import io.mockk.spyk
 import io.mockk.verify
 import kotlinx.coroutines.runBlocking
+import org.junit.Assert.assertEquals
 import org.junit.Before
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -48,6 +50,10 @@ class AmplitudeFlutterPluginTest {
             "serverZone" to "us",
             "serverUrl" to null,
             "minTimeBetweenSessionsMillis" to 5 * 60 * 1000, // 5 minutes
+            // Dart's Configuration.toMap() still sends the deprecated
+            // defaultTracking map, but the plugin reads only the resolved
+            // autocapture value (see Configuration._resolveAutocapture). Send
+            // both, as the Dart side does.
             "defaultTracking" to mapOf(
                 "sessions" to true,
                 "appLifecycles" to false,
@@ -56,6 +62,20 @@ class AmplitudeFlutterPluginTest {
                 "pageViews" to true,
                 "formInteractions" to true,
                 "fileDownloads" to true
+            ),
+            // The autocapture map Dart derives from the defaultTracking above.
+            "autocapture" to mapOf(
+                "sessions" to true,
+                "attribution" to mapOf(
+                    "initialEmptyValue" to "EMPTY",
+                    "resetSessionOnNewCampaign" to false
+                ),
+                "pageViews" to mapOf(
+                    "trackHistoryChanges" to "all",
+                    "eventType" to ""
+                ),
+                "appLifecycles" to false,
+                "deepLinks" to false
             ),
             "trackingOptions" to mapOf(
                 "ipAddress" to true,
@@ -153,12 +173,45 @@ class AmplitudeFlutterPluginTest {
         shadowOf(Looper.getMainLooper()).idle()
     }
 
+    private fun autocaptureOf(instanceName: String = "\$default_instance"): Set<AutocaptureOption> {
+        val amp = AmplitudeFlutterPlugin.getAmplitudeInstanceById(instanceName)!!
+        // Amplitude.configuration is typed as the core Configuration; autocapture
+        // is declared on the Android subclass.
+        return (amp.configuration as com.amplitude.android.Configuration).autocapture
+    }
+
     @Test
     fun shouldInit() {
         val methodCall = MethodCall("init", testConfigurationMap)
         plugin.onMethodCall(methodCall, result)
 
         verify(exactly = 1) { result.success("init called..") }
+    }
+
+    @Test
+    fun initAppliesAutocaptureFromMap() {
+        // Use a combination that differs from the native SDK defaults, so this
+        // only passes if the plugin actually parsed the autocapture map.
+        testConfigurationMap["autocapture"] = mapOf(
+            "sessions" to false,
+            "appLifecycles" to true,
+            "deepLinks" to true
+        )
+        plugin.onMethodCall(MethodCall("init", testConfigurationMap), result)
+
+        assertEquals(
+            setOf(AutocaptureOption.APP_LIFECYCLES, AutocaptureOption.DEEP_LINKS),
+            autocaptureOf()
+        )
+    }
+
+    @Test
+    fun initDisablesAutocaptureWhenFalse() {
+        // AutocaptureDisabled serializes to `false` rather than a map.
+        testConfigurationMap["autocapture"] = false
+        plugin.onMethodCall(MethodCall("init", testConfigurationMap), result)
+
+        assertEquals(emptySet<AutocaptureOption>(), autocaptureOf())
     }
 
     @Test
