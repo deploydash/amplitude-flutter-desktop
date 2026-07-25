@@ -53,7 +53,7 @@ jobs:
       # without doing a full APK build, so ./gradlew is available below.
       - name: Generate Android build config
         working-directory: example
-        run: flutter build apk --config-only
+        run: flutter build apk --config-only --no-pub
 
       - name: Run plugin unit tests
         working-directory: example/android
