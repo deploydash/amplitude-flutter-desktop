@@ -1,18 +1,28 @@
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 
+import 'download_launcher_stub.dart'
+    if (dart.library.js_interop) 'download_launcher_web.dart';
+
 /// File-download autocapture playground (web only).
 ///
 /// The Browser SDK's `fileDownloads` tracking attaches a click listener to DOM
-/// anchors whose href has a downloadable extension. Flutter's accessibility
-/// semantics tree renders a link-flagged node as a **real `<a href="...">`
-/// element**, so no JS interop is needed: wrapping a widget in
-/// `Semantics(link: true, linkUrl: ...)` is enough for
-/// `[Amplitude] File Downloaded` to fire (verified live — the captured
-/// `[Amplitude] Link ID` is the `flt-semantic-node-*` id).
+/// anchors whose href has a downloadable extension. Flutter widgets are painted
+/// to a canvas, so an anchor has to come from somewhere. This screen offers both
+/// routes:
 ///
-/// Requires semantics to be enabled (see `main.dart`), which is also what makes
-/// click and change capture work under CanvasKit.
+/// 1. **JS interop (primary, always works).** Creates a persistent
+///    `<a href="sample.pdf" download>` and clicks it programmatically. Works
+///    whether or not the accessibility semantics tree is enabled.
+/// 2. **Pure-Flutter `Semantics(link:)` (requires semantics).** Flutter renders
+///    a link-flagged semantics node as a real `<a href="...">`, so this needs no
+///    JS interop — but **only while semantics is enabled**. If semantics is off
+///    the node doesn't exist, the tap does nothing, and no event fires. Flutter
+///    enables semantics when a screen reader is detected, when the user
+///    activates the hidden placeholder button, or via
+///    `SemanticsBinding.instance.ensureSemantics()` (see `main.dart`) — the last
+///    of which did not reliably take effect on a cold load in testing, so treat
+///    this path as conditional.
 class DownloadsScreen extends StatelessWidget {
   const DownloadsScreen({super.key});
 
@@ -22,33 +32,43 @@ class DownloadsScreen extends StatelessWidget {
       appBar: AppBar(title: const Text('Downloads')),
       body: Padding(
         padding: const EdgeInsets.all(10.0),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
+        child: ListView(
           children: [
             Text(
               kIsWeb
-                  ? 'The link below is a link-flagged Semantics node, which '
-                      'Flutter renders as a real <a href="sample.pdf"> in the '
-                      'semantics tree. Tapping it downloads the file and the '
-                      'Browser SDK captures [Amplitude] File Downloaded.'
-                  : 'File-download autocapture is web-only. On this platform '
-                      'the link below does nothing; the screen still emits its '
+                  ? 'Two ways to reach [Amplitude] File Downloaded. The button '
+                      'clicks a DOM anchor via JS interop and always works. The '
+                      'link below is a Semantics(link:) node, which only exists '
+                      '(and only captures) while the semantics tree is enabled.'
+                  : 'File-download autocapture is web-only; on this platform '
+                      'both controls are no-ops. This screen still emits its '
                       '[Amplitude] Screen Viewed event.',
               style: Theme.of(context).textTheme.bodyLarge,
             ),
-            const SizedBox(height: 20),
+            const Divider(),
+            Text('1. DOM anchor via JS interop (always works)',
+                style: Theme.of(context).textTheme.titleMedium),
+            const SizedBox(height: 10),
+            ElevatedButton(
+              child: const Text('Download sample.pdf'),
+              onPressed: launchTestDownload,
+            ),
+            const Divider(),
+            Text('2. Pure-Flutter Semantics link (needs semantics enabled)',
+                style: Theme.of(context).textTheme.titleMedium),
+            const SizedBox(height: 10),
             Semantics(
               link: true,
               linkUrl: Uri.parse('sample.pdf'),
               child: InkWell(
-                // The DOM anchor itself performs the navigation/download on
-                // web; this tap handler only exists so the widget is
-                // interactive (and is a no-op on mobile).
-                onTap: () {},
+                // On web the semantics <a> performs the download itself; this
+                // fallback keeps the control useful when semantics is off (and
+                // on mobile), so a tap is never silently inert.
+                onTap: launchTestDownload,
                 child: Padding(
                   padding: const EdgeInsets.all(12.0),
                   child: Text(
-                    'Download sample.pdf',
+                    'Download sample.pdf (semantics link)',
                     style: TextStyle(
                         color: Theme.of(context).colorScheme.primary,
                         decoration: TextDecoration.underline),
