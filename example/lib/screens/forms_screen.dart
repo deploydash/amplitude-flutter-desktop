@@ -2,10 +2,11 @@ import 'package:flutter/material.dart';
 
 /// Form-interaction autocapture playground (web only).
 ///
-/// **Known limitation (verified live):** the Browser SDK's `formInteractions`
-/// plugin only attaches listeners to DOM `<form>` elements, and Flutter web
-/// (CanvasKit + semantics) renders text fields as bare `<input>`s with no
-/// `<form>` wrapper — even inside an [AutofillGroup]. So
+/// **Known limitation (verified live, incl. real tap-and-type):** the Browser
+/// SDK's `formInteractions` plugin only attaches listeners to DOM `<form>`
+/// elements. With semantics enabled, Flutter hosts the editable `<input>`
+/// directly inside its `flt-semantics` node with no `<form>` wrapper — even
+/// inside an [AutofillGroup] (`document.forms.length == 0` while typing). So
 /// `[Amplitude] Form Started` / `[Amplitude] Form Submitted` do NOT fire on
 /// Flutter web today.
 ///

@@ -1,16 +1,18 @@
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 
-import 'download_launcher_stub.dart'
-    if (dart.library.js_interop) 'download_launcher_web.dart';
-
 /// File-download autocapture playground (web only).
 ///
-/// The Browser SDK's `fileDownloads` tracking listens for clicks on DOM
-/// anchors whose href has a downloadable extension. Flutter widgets never
-/// produce such anchors, so the button clicks a real `<a href="sample.pdf"
-/// download>` element created via JS interop (see
-/// `download_launcher_web.dart`), which emits `[Amplitude] File Downloaded`.
+/// The Browser SDK's `fileDownloads` tracking attaches a click listener to DOM
+/// anchors whose href has a downloadable extension. Flutter's accessibility
+/// semantics tree renders a link-flagged node as a **real `<a href="...">`
+/// element**, so no JS interop is needed: wrapping a widget in
+/// `Semantics(link: true, linkUrl: ...)` is enough for
+/// `[Amplitude] File Downloaded` to fire (verified live — the captured
+/// `[Amplitude] Link ID` is the `flt-semantic-node-*` id).
+///
+/// Requires semantics to be enabled (see `main.dart`), which is also what makes
+/// click and change capture work under CanvasKit.
 class DownloadsScreen extends StatelessWidget {
   const DownloadsScreen({super.key});
 
@@ -25,18 +27,34 @@ class DownloadsScreen extends StatelessWidget {
           children: [
             Text(
               kIsWeb
-                  ? 'Tapping the button clicks a real DOM <a download> anchor '
-                      'pointing at sample.pdf; the Browser SDK captures it as '
-                      '[Amplitude] File Downloaded.'
-                  : 'File-download autocapture is web-only; on this platform '
-                      'the button is a no-op. This screen still emits its '
+                  ? 'The link below is a link-flagged Semantics node, which '
+                      'Flutter renders as a real <a href="sample.pdf"> in the '
+                      'semantics tree. Tapping it downloads the file and the '
+                      'Browser SDK captures [Amplitude] File Downloaded.'
+                  : 'File-download autocapture is web-only. On this platform '
+                      'the link below does nothing; the screen still emits its '
                       '[Amplitude] Screen Viewed event.',
               style: Theme.of(context).textTheme.bodyLarge,
             ),
-            const SizedBox(height: 10),
-            ElevatedButton(
-              child: const Text('Download sample.pdf'),
-              onPressed: launchTestDownload,
+            const SizedBox(height: 20),
+            Semantics(
+              link: true,
+              linkUrl: Uri.parse('sample.pdf'),
+              child: InkWell(
+                // The DOM anchor itself performs the navigation/download on
+                // web; this tap handler only exists so the widget is
+                // interactive (and is a no-op on mobile).
+                onTap: () {},
+                child: Padding(
+                  padding: const EdgeInsets.all(12.0),
+                  child: Text(
+                    'Download sample.pdf',
+                    style: TextStyle(
+                        color: Theme.of(context).colorScheme.primary,
+                        decoration: TextDecoration.underline),
+                  ),
+                ),
+              ),
             ),
           ],
         ),
