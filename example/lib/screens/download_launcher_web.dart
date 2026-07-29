@@ -1,33 +1,46 @@
 import 'dart:js_interop';
 import 'dart:js_interop_unsafe';
 
-const String _anchorId = 'amp-testbed-download-anchor';
+JSObject get _document => globalContext.getProperty<JSObject>('document'.toJS);
 
-/// Clicks a real, persistent DOM `<a href="sample.pdf" download>` anchor.
+/// Creates (once) and clicks a real DOM `<a>` with [href].
 ///
-/// The Browser SDK's file-download tracking attaches a per-anchor click
-/// listener, discovering new anchors through a `MutationObserver`. Observer
-/// callbacks are asynchronous, so the anchor must already be in the DOM well
-/// before it is clicked — a create-click-remove sequence in one task is
-/// guaranteed to be missed. The anchor is therefore created once, kept in the
-/// DOM, and the very first click is deferred long enough for the observer to
-/// attach the listener.
-Future<void> launchTestDownload() async {
-  final document = globalContext.getProperty<JSObject>('document'.toJS);
-
-  var anchor = document.callMethod<JSObject?>(
-      'getElementById'.toJS, _anchorId.toJS);
+/// The Browser SDK's file-download plugin discovers anchors through an async
+/// `MutationObserver`, so the anchor must already be in the DOM before it is
+/// clicked — a create-click-remove sequence in a single task is always missed.
+/// The anchor is therefore keyed by [id], kept in the DOM, and the first click
+/// is deferred long enough for the listener to attach.
+///
+/// Set [withDownloadAttr] to add `download`, which makes the browser save the
+/// file instead of navigating to / previewing it. It has no effect on capture —
+/// the plugin only tests the href's extension.
+Future<void> clickSyntheticAnchor({
+  required String id,
+  required String href,
+  bool withDownloadAttr = false,
+  bool newTab = false,
+}) async {
+  var anchor = _document.callMethod<JSObject?>('getElementById'.toJS, id.toJS);
   if (anchor == null) {
-    anchor = document.callMethod<JSObject>('createElement'.toJS, 'a'.toJS);
-    anchor.setProperty('id'.toJS, _anchorId.toJS);
-    anchor.setProperty('href'.toJS, 'sample.pdf'.toJS);
-    anchor.setProperty('download'.toJS, 'sample.pdf'.toJS);
-    document
+    anchor = _document.callMethod<JSObject>('createElement'.toJS, 'a'.toJS);
+    anchor.setProperty('id'.toJS, id.toJS);
+    anchor.setProperty('href'.toJS, href.toJS);
+    if (withDownloadAttr) {
+      anchor.setProperty('download'.toJS, ''.toJS);
+    }
+    if (newTab) {
+      anchor.setProperty('target'.toJS, '_blank'.toJS);
+    }
+    _document
         .getProperty<JSObject>('body'.toJS)
         .callMethod('appendChild'.toJS, anchor);
-    // Give the file-download plugin's MutationObserver time to see the new
-    // anchor and attach its click listener before the first click.
     await Future<void>.delayed(const Duration(milliseconds: 100));
   }
   anchor.callMethod('click'.toJS);
+}
+
+/// Opens [href] with `window.open`, the same mechanism `url_launcher` uses on
+/// web. No anchor is clicked, so the file-download plugin never sees it.
+void openWithWindowOpen(String href) {
+  globalContext.callMethod('open'.toJS, href.toJS, '_blank'.toJS);
 }

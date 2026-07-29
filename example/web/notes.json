@@ -1,0 +1,3 @@
+{
+  "note": "Negative control for file-download autocapture: .json is not in the plugin extension list, so clicking a link to this file must NOT emit [Amplitude] File Downloaded."
+}
