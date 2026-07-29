@@ -53,6 +53,16 @@ class DownloadsScreen extends StatelessWidget {
             const Divider(),
             Text('1. Real autocapture: Semantics link (no interop)',
                 style: Theme.of(context).textTheme.titleMedium),
+            const SizedBox(height: 6),
+            if (kIsWeb)
+              Text(
+                'Requires the semantics tree. Flutter gates it behind the '
+                '"Enable accessibility" button the engine injects — Tab to it '
+                'and press Enter (or click it) before testing. Verify with '
+                "document.querySelectorAll('flt-semantics').length in the "
+                'console: 0 means semantics is off and this link emits nothing.',
+                style: Theme.of(context).textTheme.bodySmall,
+              ),
             const SizedBox(height: 10),
             Semantics(
               link: true,
