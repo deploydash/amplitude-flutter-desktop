@@ -8,21 +8,26 @@ import 'download_launcher_stub.dart'
 ///
 /// The Browser SDK's `fileDownloads` tracking attaches a click listener to DOM
 /// anchors whose href has a downloadable extension. Flutter widgets are painted
-/// to a canvas, so an anchor has to come from somewhere. This screen offers both
-/// routes:
+/// to a canvas, so an anchor has to come from somewhere.
 ///
-/// 1. **JS interop (primary, always works).** Creates a persistent
-///    `<a href="sample.pdf" download>` and clicks it programmatically. Works
-///    whether or not the accessibility semantics tree is enabled.
-/// 2. **Pure-Flutter `Semantics(link:)` (requires semantics).** Flutter renders
-///    a link-flagged semantics node as a real `<a href="...">`, so this needs no
-///    JS interop — but **only while semantics is enabled**. If semantics is off
-///    the node doesn't exist, the tap does nothing, and no event fires. Flutter
-///    enables semantics when a screen reader is detected, when the user
-///    activates the hidden placeholder button, or via
-///    `SemanticsBinding.instance.ensureSemantics()` (see `main.dart`) — the last
-///    of which did not reliably take effect on a cold load in testing, so treat
-///    this path as conditional.
+/// **The only genuine autocapture route is `Semantics(link: true, linkUrl: ...)`**
+/// (section 1). Flutter renders a link-flagged semantics node as a real
+/// `<a href="...">`; that anchor receives the user's click, performs the
+/// download natively, and is what the Browser SDK captures — no JS interop and
+/// no Dart tap handler required.
+///
+/// It works **only while the semantics tree is enabled** (screen reader
+/// detected, the hidden placeholder activated, or
+/// `SemanticsBinding.instance.ensureSemantics()` — see `main.dart`, which did
+/// not reliably take effect on a cold load in testing). With semantics off no
+/// anchor exists and nothing fires.
+///
+/// Section 2 is a **synthetic control**, not a pattern to copy: it fabricates an
+/// anchor via JS interop purely to isolate SDK-plugin failures from
+/// Flutter-emitted-no-DOM failures.
+///
+/// Caveat: `Semantics` cannot set the anchor's `download` attribute, so the
+/// browser may navigate to / preview the file instead of saving it.
 class DownloadsScreen extends StatelessWidget {
   const DownloadsScreen({super.key});
 
@@ -46,25 +51,21 @@ class DownloadsScreen extends StatelessWidget {
               style: Theme.of(context).textTheme.bodyLarge,
             ),
             const Divider(),
-            Text('1. DOM anchor via JS interop (always works)',
-                style: Theme.of(context).textTheme.titleMedium),
-            const SizedBox(height: 10),
-            ElevatedButton(
-              child: const Text('Download sample.pdf'),
-              onPressed: launchTestDownload,
-            ),
-            const Divider(),
-            Text('2. Pure-Flutter Semantics link (needs semantics enabled)',
+            Text('1. Real autocapture: Semantics link (no interop)',
                 style: Theme.of(context).textTheme.titleMedium),
             const SizedBox(height: 10),
             Semantics(
               link: true,
               linkUrl: Uri.parse('sample.pdf'),
               child: InkWell(
-                // On web the semantics <a> performs the download itself; this
-                // fallback keeps the control useful when semantics is off (and
-                // on mobile), so a tap is never silently inert.
-                onTap: launchTestDownload,
+                // Deliberately a no-op: the DOM <a> that Flutter renders for
+                // this link-flagged node receives the real click and performs
+                // the download itself, and it is that anchor click the Browser
+                // SDK captures. Calling a JS-interop helper here would fire a
+                // second, synthetic anchor click and make it impossible to tell
+                // which path produced the event. If semantics is disabled this
+                // control does nothing at all — that is the honest behavior.
+                onTap: () {},
                 child: Padding(
                   padding: const EdgeInsets.all(12.0),
                   child: Text(
@@ -75,6 +76,23 @@ class DownloadsScreen extends StatelessWidget {
                   ),
                 ),
               ),
+            ),
+            const Divider(),
+            Text('2. Synthetic control — NOT autocapture',
+                style: Theme.of(context).textTheme.titleMedium),
+            const SizedBox(height: 10),
+            Text(
+              'Creates and clicks a DOM anchor via JS interop. No customer '
+              'would write this; it exists only to isolate a failure — if this '
+              'fires but the link above does not, the Browser SDK plugin is '
+              'fine and the problem is that Flutter emitted no anchor (usually '
+              'semantics being off).',
+              style: Theme.of(context).textTheme.bodyMedium,
+            ),
+            const SizedBox(height: 10),
+            ElevatedButton(
+              child: const Text('Download sample.pdf (synthetic)'),
+              onPressed: launchTestDownload,
             ),
           ],
         ),
