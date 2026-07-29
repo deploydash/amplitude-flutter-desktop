@@ -1,6 +1,10 @@
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 
+// ignore_for_file: depend_on_referenced_packages
+import 'package:amplitude_flutter/events/base_event.dart';
+
+import '../app_state.dart';
 import 'download_launcher_stub.dart'
     if (dart.library.js_interop) 'download_launcher_web.dart';
 
@@ -52,6 +56,7 @@ class DownloadsScreen extends StatelessWidget {
 
           _DownloadCase(
             id: 'A',
+            mode: 'Semantics(link:) -> sample.pdf',
             title: 'Semantics link → sample.pdf',
             detail: 'Semantics(link: true, linkUrl: ...) renders a real '
                 '<a href="sample.pdf">. The anchor takes the click and does the '
@@ -66,6 +71,7 @@ class DownloadsScreen extends StatelessWidget {
 
           _DownloadCase(
             id: 'B',
+            mode: 'Semantics(link:) -> sample.pdf?v=2',
             title: 'Semantics link → sample.pdf?v=2 (query string)',
             detail: 'Proves the extension regex tolerates a trailing query '
                 'string, so cache-busted or signed URLs still capture.',
@@ -79,6 +85,7 @@ class DownloadsScreen extends StatelessWidget {
 
           _DownloadCase(
             id: 'C',
+            mode: 'Semantics(link:) -> notes.json',
             title: 'Semantics link → notes.json (non-downloadable extension)',
             detail: 'An anchor exists and is clicked, but .json is not in the '
                 "plugin's extension list, so it is ignored. Isolates the "
@@ -94,6 +101,7 @@ class DownloadsScreen extends StatelessWidget {
 
           _DownloadCase(
             id: 'D',
+            mode: 'plain ElevatedButton, no DOM',
             title: 'Plain ElevatedButton (no DOM at all)',
             detail: 'What an ordinary Flutter app looks like: the tap never '
                 'touches the DOM, so there is nothing for the plugin to '
@@ -115,6 +123,7 @@ class DownloadsScreen extends StatelessWidget {
 
           _DownloadCase(
             id: 'E',
+            mode: 'window.open(sample.pdf)',
             title: 'window.open (what url_launcher does on web)',
             detail: 'Downloads/opens the file, but navigation via window.open '
                 'dispatches no anchor click — so url_launcher-style downloads '
@@ -139,6 +148,7 @@ class DownloadsScreen extends StatelessWidget {
 
           _DownloadCase(
             id: 'F',
+            mode: 'JS-interop anchor -> sample.pdf',
             title: 'Interop anchor → sample.pdf',
             detail: 'Semantics-independent: works even with the semantics tree '
                 'disabled, because the app supplies the anchor itself.',
@@ -156,6 +166,7 @@ class DownloadsScreen extends StatelessWidget {
 
           _DownloadCase(
             id: 'G',
+            mode: 'JS-interop anchor + download attr -> sample.pdf',
             title: 'Interop anchor + download attribute',
             detail: 'Identical capture to F — the `download` attribute only '
                 'changes save-vs-preview behavior, it is not part of the '
@@ -198,12 +209,14 @@ class _SectionHeader extends StatelessWidget {
   }
 }
 
-/// One download mode: what it is, whether autocapture should record it, and the
-/// control that triggers it.
+/// One download mode: what it is, whether autocapture should record it, the
+/// control that triggers it, and a marker button that describes the case in the
+/// event stream.
 class _DownloadCase extends StatelessWidget {
   const _DownloadCase({
     required this.id,
     required this.title,
+    required this.mode,
     required this.detail,
     required this.captured,
     required this.requiresSemantics,
@@ -212,6 +225,11 @@ class _DownloadCase extends StatelessWidget {
 
   final String id;
   final String title;
+
+  /// Terse machine-friendly description of the trigger, sent on the marker event
+  /// so the stream is readable without cross-referencing this file.
+  final String mode;
+
   final String detail;
 
   /// Whether `[Amplitude] File Downloaded` is expected for this mode.
@@ -221,6 +239,30 @@ class _DownloadCase extends StatelessWidget {
   final bool requiresSemantics;
 
   final Widget child;
+
+  String get _expectedEvent =>
+      captured ? '[Amplitude] File Downloaded' : '(none)';
+
+  /// Emits a labeled breadcrumb immediately before the case is exercised, so the
+  /// event stream reads "marker → (expected autocapture event or nothing)".
+  /// Flushed right away so ordering in the stream is obvious.
+  Future<void> _mark(BuildContext context) async {
+    final appState = AppState.of(context);
+    await appState.analytics.track(BaseEvent(
+      'Testbed Marker',
+      eventProperties: {
+        'surface': 'downloads',
+        'case': id,
+        'mode': mode,
+        'expected event': _expectedEvent,
+        'expect capture': captured,
+        'requires semantics': requiresSemantics,
+      },
+    ));
+    await appState.analytics.flush();
+    appState.setMessage(
+        'Marked case $id — next expect: $_expectedEvent. Now trigger it.');
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -249,7 +291,16 @@ class _DownloadCase extends StatelessWidget {
                   .bodySmall
                   ?.copyWith(color: color, fontWeight: FontWeight.bold)),
           const SizedBox(height: 8),
-          child,
+          Row(
+            children: [
+              OutlinedButton(
+                onPressed: () => _mark(context),
+                child: Text('Mark $id in stream'),
+              ),
+              const SizedBox(width: 12),
+              Flexible(child: child),
+            ],
+          ),
         ],
       ),
     );
