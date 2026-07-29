@@ -390,15 +390,27 @@ class _DownloadCase extends StatelessWidget {
                   .bodySmall
                   ?.copyWith(color: color, fontWeight: FontWeight.bold)),
           const SizedBox(height: 8),
-          Row(
-            children: [
-              OutlinedButton(
+          // The trigger control must stand alone, NOT inside a Row/Flexible:
+          // wrapping a link-flagged Semantics node that way stopped Flutter
+          // emitting any DOM node for it (verified — the <a> disappeared and the
+          // case became untestable), which is exactly the failure mode this
+          // screen exists to observe.
+          child,
+          const SizedBox(height: 6),
+          // ExcludeSemantics is load-bearing: a focusable sibling inside the same
+          // case block perturbs the link node next to it, and because
+          // SemanticsConfiguration.absorb() copies the isLink flag but NOT
+          // linkUrl (Flutter 3.29.2), the resulting <a> loses its href and the
+          // Browser SDK can no longer match it. Keeping the marker out of the
+          // semantics tree leaves the link node clean. It stays mouse-clickable.
+          ExcludeSemantics(
+            child: Align(
+              alignment: Alignment.centerLeft,
+              child: OutlinedButton(
                 onPressed: () => _mark(context),
                 child: Text('Mark $id in stream'),
               ),
-              const SizedBox(width: 12),
-              Flexible(child: child),
-            ],
+            ),
           ),
         ],
       ),
@@ -427,6 +439,13 @@ class _SemanticsLink extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Semantics(
+      // `container: true` is load-bearing. Without it this Semantics annotates
+      // the nearest enclosing node instead of creating its own, and that merge
+      // runs through SemanticsConfiguration.absorb(), which copies the isLink
+      // flag but NOT linkUrl (Flutter 3.29.2). The result is an <a> element with
+      // no href — the Browser SDK then has nothing to match its extension regex
+      // against, so File Downloaded never fires. Verified both ways in the DOM.
+      container: true,
       link: true,
       linkUrl: Uri.parse(href),
       child: InkWell(
