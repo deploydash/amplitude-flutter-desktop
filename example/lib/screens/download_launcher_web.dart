@@ -44,3 +44,33 @@ Future<void> clickSyntheticAnchor({
 void openWithWindowOpen(String href) {
   globalContext.callMethod('open'.toJS, href.toJS, '_blank'.toJS);
 }
+
+/// Whether Flutter is currently emitting a DOM semantics tree.
+///
+/// This is the real gate for every DOM-based autocapture feature, and it is not
+/// observable from the framework: `SemanticsBinding.semanticsEnabled` reports
+/// `true` as soon as a handle exists, while the web engine may still be gated.
+/// Counting `flt-semantics` elements reflects what the Browser SDK can actually
+/// see.
+bool isSemanticsTreeLive() {
+  final nodes = _document.callMethod<JSObject>(
+      'querySelectorAll'.toJS, 'flt-semantics'.toJS);
+  return (nodes.getProperty<JSNumber>('length'.toJS).toDartInt) > 0;
+}
+
+/// Turns the semantics tree on by activating the engine's injected
+/// "Enable accessibility" placeholder.
+///
+/// Test tooling only — this is not part of any capture path. The engine enables
+/// semantics on a `click` whose target is the placeholder itself and then
+/// removes the placeholder, which is exactly what assistive technology triggers.
+/// Returns false when the placeholder is absent (semantics already on).
+bool enableSemanticsTree() {
+  final placeholder = _document.callMethod<JSObject?>(
+      'querySelector'.toJS, 'flt-semantics-placeholder'.toJS);
+  if (placeholder == null) {
+    return false;
+  }
+  placeholder.callMethod('click'.toJS);
+  return true;
+}

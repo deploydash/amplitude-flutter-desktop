@@ -8,3 +8,7 @@ Future<void> clickSyntheticAnchor({
 }) async {}
 
 void openWithWindowOpen(String href) {}
+
+bool isSemanticsTreeLive() => false;
+
+bool enableSemanticsTree() => false;

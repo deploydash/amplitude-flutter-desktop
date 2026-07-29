@@ -23,8 +23,37 @@ import 'download_launcher_stub.dart'
 ///    `mp4|mpe?g|wmv|midi?|mp3|wav|wma`, optionally followed by `?query`.
 ///
 /// Each row states the expected outcome so a tester can diff reality against it.
-class DownloadsScreen extends StatelessWidget {
+class DownloadsScreen extends StatefulWidget {
   const DownloadsScreen({super.key});
+
+  @override
+  State<DownloadsScreen> createState() => _DownloadsScreenState();
+}
+
+class _DownloadsScreenState extends State<DownloadsScreen> {
+  bool _semanticsLive = false;
+  String _lastAction = 'none yet';
+
+  @override
+  void initState() {
+    super.initState();
+    _refreshSemantics();
+  }
+
+  void _refreshSemantics() {
+    setState(() => _semanticsLive = kIsWeb && isSemanticsTreeLive());
+  }
+
+  void _enableSemantics() {
+    final activated = enableSemanticsTree();
+    // The engine builds the tree on the next frame, so re-read after it lands.
+    WidgetsBinding.instance.addPostFrameCallback((_) => _refreshSemantics());
+    setState(() => _lastAction = activated
+        ? 'clicked the accessibility placeholder'
+        : 'placeholder absent (semantics already on, or not web)');
+  }
+
+  void _note(String action) => setState(() => _lastAction = action);
 
   @override
   Widget build(BuildContext context) {
@@ -33,17 +62,16 @@ class DownloadsScreen extends StatelessWidget {
       body: ListView(
         padding: const EdgeInsets.all(10.0),
         children: [
-          if (kIsWeb)
-            Text(
-              'Enable the semantics tree first — Tab to the injected "Enable '
-              'accessibility" button and press Enter, or click it. Without it, '
-              'cases A–C emit nothing. Verify with '
-              "document.querySelectorAll('flt-semantics').length > 0. Note "
-              'SemanticsBinding.ensureSemantics() does NOT enable it on Flutter '
-              '3.29.2.',
-              style: Theme.of(context).textTheme.bodyMedium,
-            )
-          else
+          if (kIsWeb) ...[
+            _SemanticsBanner(
+              live: _semanticsLive,
+              onEnable: _enableSemantics,
+              onRecheck: _refreshSemantics,
+            ),
+            const SizedBox(height: 8),
+            Text('Last local action: $_lastAction',
+                style: Theme.of(context).textTheme.bodySmall),
+          ] else
             Text(
               'File-download autocapture is web-only. Every control below is a '
               'no-op on this platform; the screen still emits its '
@@ -66,6 +94,7 @@ class DownloadsScreen extends StatelessWidget {
             child: _SemanticsLink(
               href: 'sample.pdf',
               label: 'A. Download sample.pdf',
+              onTapped: () => _note('A tapped'),
             ),
           ),
 
@@ -80,6 +109,7 @@ class DownloadsScreen extends StatelessWidget {
             child: _SemanticsLink(
               href: 'sample.pdf?v=2',
               label: 'B. Download sample.pdf?v=2',
+              onTapped: () => _note('B tapped'),
             ),
           ),
 
@@ -96,6 +126,7 @@ class DownloadsScreen extends StatelessWidget {
             child: _SemanticsLink(
               href: 'notes.json',
               label: 'C. Open notes.json',
+              onTapped: () => _note('C tapped'),
             ),
           ),
 
@@ -108,16 +139,9 @@ class DownloadsScreen extends StatelessWidget {
                 'observe. This is the default no-capture case.',
             captured: false,
             requiresSemantics: false,
-            child: Builder(
-              builder: (context) => ElevatedButton(
-                child: const Text('D. Plain button (no anchor)'),
-                onPressed: () =>
-                    ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
-                  content:
-                      Text('Tapped — no DOM anchor involved, so no event.'),
-                  duration: Duration(seconds: 2),
-                )),
-              ),
+            child: ElevatedButton(
+              child: const Text('D. Plain button (no anchor)'),
+              onPressed: () => _note('D tapped — no DOM touched, so no event'),
             ),
           ),
 
@@ -132,7 +156,10 @@ class DownloadsScreen extends StatelessWidget {
             requiresSemantics: false,
             child: ElevatedButton(
               child: const Text('E. window.open(sample.pdf)'),
-              onPressed: () => openWithWindowOpen('sample.pdf'),
+              onPressed: () {
+                openWithWindowOpen('sample.pdf');
+                _note('E tapped — window.open, no anchor click');
+              },
             ),
           ),
 
@@ -156,11 +183,14 @@ class DownloadsScreen extends StatelessWidget {
             requiresSemantics: false,
             child: ElevatedButton(
               child: const Text('F. Interop anchor'),
-              onPressed: () => clickSyntheticAnchor(
-                id: 'amp-testbed-anchor-plain',
-                href: 'sample.pdf',
-                newTab: true,
-              ),
+              onPressed: () {
+                clickSyntheticAnchor(
+                  id: 'amp-testbed-anchor-plain',
+                  href: 'sample.pdf',
+                  newTab: true,
+                );
+                _note('F tapped — synthetic anchor clicked');
+              },
             ),
           ),
 
@@ -176,12 +206,81 @@ class DownloadsScreen extends StatelessWidget {
             requiresSemantics: false,
             child: ElevatedButton(
               child: const Text('G. Interop anchor (download attr)'),
-              onPressed: () => clickSyntheticAnchor(
-                id: 'amp-testbed-anchor-download',
-                href: 'sample.pdf',
-                withDownloadAttr: true,
-              ),
+              onPressed: () {
+                clickSyntheticAnchor(
+                  id: 'amp-testbed-anchor-download',
+                  href: 'sample.pdf',
+                  withDownloadAttr: true,
+                );
+                _note('G tapped — synthetic anchor + download attr');
+              },
             ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// Shows whether Flutter is emitting a DOM semantics tree — the real gate for
+/// every DOM-based autocapture feature — and lets the tester turn it on.
+///
+/// Reads the DOM rather than `SemanticsBinding.semanticsEnabled`, which reports
+/// `true` while the web engine is still gated (verified on Flutter 3.29.2).
+class _SemanticsBanner extends StatelessWidget {
+  const _SemanticsBanner({
+    required this.live,
+    required this.onEnable,
+    required this.onRecheck,
+  });
+
+  final bool live;
+  final VoidCallback onEnable;
+  final VoidCallback onRecheck;
+
+  @override
+  Widget build(BuildContext context) {
+    final color = live ? Colors.green.shade800 : Colors.red.shade800;
+    return Container(
+      padding: const EdgeInsets.all(10),
+      decoration: BoxDecoration(
+        border: Border.all(color: color),
+        borderRadius: BorderRadius.circular(6),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            live ? 'Semantics tree: LIVE' : 'Semantics tree: OFF',
+            style: Theme.of(context)
+                .textTheme
+                .titleSmall
+                ?.copyWith(color: color, fontWeight: FontWeight.bold),
+          ),
+          const SizedBox(height: 4),
+          Text(
+            live
+                ? 'Flutter is emitting DOM nodes, so cases A–C can capture.'
+                : 'No DOM nodes exist, so cases A–C are inert — they cannot '
+                    'emit anything (F/G still work; they build their own '
+                    'anchor). SemanticsBinding.ensureSemantics() does not fix '
+                    'this on Flutter 3.29.2; the engine only enables semantics '
+                    'when its injected placeholder is activated.',
+            style: Theme.of(context).textTheme.bodySmall,
+          ),
+          const SizedBox(height: 8),
+          Row(
+            children: [
+              ElevatedButton(
+                onPressed: live ? null : onEnable,
+                child: const Text('Enable semantics'),
+              ),
+              const SizedBox(width: 8),
+              OutlinedButton(
+                onPressed: onRecheck,
+                child: const Text('Re-check'),
+              ),
+            ],
           ),
         ],
       ),
@@ -311,10 +410,19 @@ class _DownloadCase extends StatelessWidget {
 /// `<a href="...">` in the DOM. [InkWell.onTap] is deliberately a no-op so the
 /// only thing that can produce an event is the anchor's own click.
 class _SemanticsLink extends StatelessWidget {
-  const _SemanticsLink({required this.href, required this.label});
+  const _SemanticsLink({
+    required this.href,
+    required this.label,
+    required this.onTapped,
+  });
 
   final String href;
   final String label;
+
+  /// Records the tap locally so an inert case (semantics off, no `<a>` created)
+  /// is distinguishable from a tap that never landed. Touches no DOM and sends
+  /// no analytics, so it cannot affect which component produced an event.
+  final VoidCallback onTapped;
 
   @override
   Widget build(BuildContext context) {
@@ -322,7 +430,7 @@ class _SemanticsLink extends StatelessWidget {
       link: true,
       linkUrl: Uri.parse(href),
       child: InkWell(
-        onTap: () {},
+        onTap: onTapped,
         child: Padding(
           padding: const EdgeInsets.symmetric(vertical: 10),
           child: Text(
