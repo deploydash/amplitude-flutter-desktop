@@ -2,6 +2,8 @@ import 'package:amplitude_flutter/amplitude.dart';
 import 'package:amplitude_flutter/autocapture/autocapture.dart';
 import 'package:amplitude_flutter/configuration.dart';
 import 'package:amplitude_flutter/observers/amplitude_navigator_observer.dart';
+import 'package:flutter/foundation.dart'
+    show TargetPlatform, debugDefaultTargetPlatformOverride;
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:mockito/mockito.dart';
@@ -23,10 +25,15 @@ void main() {
     mockChannel = MockMethodChannel();
     when(mockChannel.invokeMethod('init', any)).thenAnswer((_) async => null);
     when(mockChannel.invokeMethod('track', any)).thenAnswer((_) async => null);
-    return Amplitude(
-      Configuration(apiKey: 'k', autocapture: autocapture),
-      mockChannel,
-    );
+    debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+    try {
+      return Amplitude(
+        Configuration(apiKey: 'k', autocapture: autocapture),
+        mockChannel,
+      );
+    } finally {
+      debugDefaultTargetPlatformOverride = null;
+    }
   }
 
   Route<dynamic> pageRoute(String? name) => MaterialPageRoute<dynamic>(

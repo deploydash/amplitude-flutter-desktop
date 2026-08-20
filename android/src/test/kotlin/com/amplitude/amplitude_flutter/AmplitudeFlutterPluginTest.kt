@@ -10,11 +10,12 @@ import io.mockk.mockk
 import io.mockk.spyk
 import io.mockk.verify
 import kotlinx.coroutines.runBlocking
-import org.json.JSONObject
+import org.junit.Assert.assertNull
 import org.junit.Before
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
+import org.robolectric.RuntimeEnvironment
 import org.robolectric.Shadows.shadowOf
 import org.robolectric.annotation.Config
 
@@ -24,13 +25,14 @@ class AmplitudeFlutterPluginTest {
     private val plugin = AmplitudeFlutterPlugin()
     private val result = spyk<MethodChannel.Result>()
     private val binding = mockk<FlutterPlugin.FlutterPluginBinding>(relaxed = true)
-    private val context = mockk<Context>()
+    private lateinit var context: Context
 
     private lateinit var testConfigurationMap: MutableMap<String, Any?>
     private lateinit var testEventMap: MutableMap<String, Any?>
 
     @Before
     fun setup() {
+        context = RuntimeEnvironment.getApplication()
         testConfigurationMap = mutableMapOf(
             "apiKey" to "test-api-key",
             "flushQueueSize" to 30,
@@ -45,7 +47,7 @@ class AmplitudeFlutterPluginTest {
             "serverZone" to "us",
             "serverUrl" to null,
             "minTimeBetweenSessionsMillis" to 5 * 60 * 1000, // 5 minutes
-            "defaultTracking" to JSONObject(mapOf(
+            "defaultTracking" to mapOf(
                 "sessions" to true,
                 "appLifecycles" to false,
                 "deepLinks" to false,
@@ -53,8 +55,8 @@ class AmplitudeFlutterPluginTest {
                 "pageViews" to true,
                 "formInteractions" to true,
                 "fileDownloads" to true
-            )),
-            "trackingOptions" to JSONObject(mapOf(
+            ),
+            "trackingOptions" to mapOf(
                 "ipAddress" to true,
                 "language" to true,
                 "platform" to true,
@@ -74,7 +76,7 @@ class AmplitudeFlutterPluginTest {
                 "latLag" to true,
                 "apiLevel" to true,
                 "idfv" to true
-            )),
+            ),
             "enableCoppaControl" to false,
             "flushEventsOnClose" to true,
             "identifyBatchIntervalMillis" to 30 * 1000,
@@ -118,17 +120,17 @@ class AmplitudeFlutterPluginTest {
             "android_id" to null,
             "language" to null,
             "library" to null,
-            "ip" to null,
-            "plan" to JSONObject(mapOf(
+            "ip" to "\$remote",
+            "plan" to mapOf(
                 "branch" to null,
                 "source" to null,
                 "version" to null,
                 "versionId" to null,
-            )),
-            "ingestion_metadata" to JSONObject(mapOf(
+            ),
+            "ingestion_metadata" to mapOf(
                 "sourceName" to null,
                 "sourceVersion" to null,
-            )),
+            ),
             "revenue" to null,
             "price" to null,
             "quantity" to null,
@@ -152,20 +154,65 @@ class AmplitudeFlutterPluginTest {
 
     @Test
     fun shouldInit() {
-        val methodCall = MethodCall("init", JSONObject(testConfigurationMap))
+        val methodCall = MethodCall("init", testConfigurationMap)
         plugin.onMethodCall(methodCall, result)
 
         verify(exactly = 1) { result.success("init called..") }
     }
 
     @Test
+    fun awaitBuildRepliesOnlyAfterNativeCompletion() {
+        plugin.onMethodCall(MethodCall("init", testConfigurationMap), result)
+        var buildCompletion: ((Throwable?) -> Unit)? = null
+        plugin.registerBuildCompletion = { _, callback -> buildCompletion = callback }
+        val buildResult = spyk<MethodChannel.Result>()
+
+        plugin.onMethodCall(
+            MethodCall("awaitBuild", mapOf("instanceName" to "\$default_instance")),
+            buildResult
+        )
+
+        verify(exactly = 0) { buildResult.success(any()) }
+
+        buildCompletion!!(null)
+        shadowOf(Looper.getMainLooper()).idle()
+
+        verify(exactly = 1) { buildResult.success(true) }
+    }
+
+    @Test
+    fun awaitBuildReportsNativeFailure() {
+        plugin.onMethodCall(MethodCall("init", testConfigurationMap), result)
+        var buildCompletion: ((Throwable?) -> Unit)? = null
+        plugin.registerBuildCompletion = { _, callback -> buildCompletion = callback }
+        val buildResult = spyk<MethodChannel.Result>()
+
+        plugin.onMethodCall(
+            MethodCall("awaitBuild", mapOf("instanceName" to "\$default_instance")),
+            buildResult
+        )
+        buildCompletion!!(IllegalStateException("native build failed"))
+        shadowOf(Looper.getMainLooper()).idle()
+
+        verify(exactly = 1) {
+            buildResult.error(
+                "amplitude_init_failed",
+                "Amplitude initialization failed.",
+                match<String> { it.contains("native build failed") }
+            )
+        }
+        verify(exactly = 0) { buildResult.success(any()) }
+        assertNull(AmplitudeFlutterPlugin.getAmplitudeInstanceById("\$default_instance"))
+    }
+
+    @Test
     fun getDeviceIdReturnsNonNullAfterInit() {
-        plugin.onMethodCall(MethodCall("init", JSONObject(testConfigurationMap)), result)
+        plugin.onMethodCall(MethodCall("init", testConfigurationMap), result)
         awaitInitialized()
 
         val deviceIdResult = spyk<MethodChannel.Result>()
         plugin.onMethodCall(
-            MethodCall("getDeviceId", JSONObject(mapOf("instanceName" to "\$default_instance"))),
+            MethodCall("getDeviceId", mapOf("instanceName" to "\$default_instance")),
             deviceIdResult
         )
         awaitInitialized()
@@ -174,12 +221,12 @@ class AmplitudeFlutterPluginTest {
 
     @Test
     fun getSessionIdReturnsValueAfterInit() {
-        plugin.onMethodCall(MethodCall("init", JSONObject(testConfigurationMap)), result)
+        plugin.onMethodCall(MethodCall("init", testConfigurationMap), result)
         awaitInitialized()
 
         val sessionIdResult = spyk<MethodChannel.Result>()
         plugin.onMethodCall(
-            MethodCall("getSessionId", JSONObject(mapOf("instanceName" to "\$default_instance"))),
+            MethodCall("getSessionId", mapOf("instanceName" to "\$default_instance")),
             sessionIdResult
         )
         awaitInitialized()
@@ -191,10 +238,10 @@ class AmplitudeFlutterPluginTest {
 
     @Test
     fun shouldTrack() {
-        val initMethodCall = MethodCall("init", JSONObject(testConfigurationMap))
+        val initMethodCall = MethodCall("init", testConfigurationMap)
         plugin.onMethodCall(initMethodCall, result)
 
-        val methodCall = MethodCall("track", JSONObject(mapOf("instanceName" to "\$default_instance", "event" to testEventMap)))
+        val methodCall = MethodCall("track", mapOf("instanceName" to "\$default_instance", "event" to testEventMap))
         plugin.onMethodCall(methodCall, result)
 
         verify(exactly = 1) { result.success("track called..") }
@@ -202,14 +249,14 @@ class AmplitudeFlutterPluginTest {
 
     @Test
     fun shouldIdentify() {
-        val initMethodCall = MethodCall("init", JSONObject(testConfigurationMap))
+        val initMethodCall = MethodCall("init", testConfigurationMap)
         plugin.onMethodCall(initMethodCall, result)
 
         testEventMap["event_type"] = "\$identify"
         testEventMap["user_properties"] = mapOf(
             "\$set" to mapOf("testProperty" to "testValue")
         )
-        val methodCall = MethodCall("identify", JSONObject(mapOf("instanceName" to "\$default_instance", "event" to testEventMap)))
+        val methodCall = MethodCall("identify", mapOf("instanceName" to "\$default_instance", "event" to testEventMap))
         plugin.onMethodCall(methodCall, result)
 
         verify(exactly = 1) { result.success("identify called..") }
@@ -217,7 +264,7 @@ class AmplitudeFlutterPluginTest {
 
     @Test
     fun shouldGroupIdentify() {
-        val initMethodCall = MethodCall("init", JSONObject(testConfigurationMap))
+        val initMethodCall = MethodCall("init", testConfigurationMap)
         plugin.onMethodCall(initMethodCall, result)
 
         testEventMap["event_type"] = "\$groupidentify"
@@ -227,7 +274,7 @@ class AmplitudeFlutterPluginTest {
         testEventMap["group_properties"] = mapOf(
             "\$set" to mapOf("testProperty" to "testValue")
         )
-        val methodCall = MethodCall("groupIdentify", JSONObject(mapOf("instanceName" to "\$default_instance", "event" to testEventMap)))
+        val methodCall = MethodCall("groupIdentify", mapOf("instanceName" to "\$default_instance", "event" to testEventMap))
         plugin.onMethodCall(methodCall, result)
 
         verify(exactly = 1) { result.success("groupIdentify called..") }
@@ -235,7 +282,7 @@ class AmplitudeFlutterPluginTest {
 
     @Test
     fun shouldSetGroup() {
-        val initMethodCall = MethodCall("init", JSONObject(testConfigurationMap))
+        val initMethodCall = MethodCall("init", testConfigurationMap)
         plugin.onMethodCall(initMethodCall, result)
 
         testEventMap["event_type"] = "\$identify"
@@ -245,7 +292,7 @@ class AmplitudeFlutterPluginTest {
         testEventMap["user_properties"] = mapOf(
             "\$set" to mapOf("testProperty" to "testValue")
         )
-        val methodCall = MethodCall("setGroup", JSONObject(mapOf("instanceName" to "\$default_instance", "event" to testEventMap)))
+        val methodCall = MethodCall("setGroup", mapOf("instanceName" to "\$default_instance", "event" to testEventMap))
         plugin.onMethodCall(methodCall, result)
 
         verify(exactly = 1) { result.success("setGroup called..") }
@@ -253,7 +300,7 @@ class AmplitudeFlutterPluginTest {
 
     @Test
     fun shouldRevenue() {
-        val initMethodCall = MethodCall("init", JSONObject(testConfigurationMap))
+        val initMethodCall = MethodCall("init", testConfigurationMap)
         plugin.onMethodCall(initMethodCall, result)
 
         testEventMap["event_type"] = "revenue_amount"
@@ -265,7 +312,7 @@ class AmplitudeFlutterPluginTest {
             "\$quantity" to "testQuantity",
             "\$productId" to "testProductId"
         )
-        val methodCall = MethodCall("revenue", JSONObject(mapOf("instanceName" to "\$default_instance", "event" to testEventMap)))
+        val methodCall = MethodCall("revenue", mapOf("instanceName" to "\$default_instance", "event" to testEventMap))
         plugin.onMethodCall(methodCall, result)
 
         verify(exactly = 1) { result.success("revenue called..") }
@@ -273,10 +320,10 @@ class AmplitudeFlutterPluginTest {
 
     @Test
     fun shouldSetUserId() {
-        val initMethodCall = MethodCall("init", JSONObject(testConfigurationMap))
+        val initMethodCall = MethodCall("init", testConfigurationMap)
         plugin.onMethodCall(initMethodCall, result)
 
-        val methodCall = MethodCall("setUserId", JSONObject(mapOf("instanceName" to "\$default_instance", "properties" to mapOf("setUserId" to "testUserId"))))
+        val methodCall = MethodCall("setUserId", mapOf("instanceName" to "\$default_instance", "properties" to mapOf("setUserId" to "testUserId")))
         plugin.onMethodCall(methodCall, result)
 
         verify(exactly = 1) { result.success("setUserId called..") }
@@ -284,10 +331,10 @@ class AmplitudeFlutterPluginTest {
 
     @Test
     fun shouldSetDeviceId() {
-        val initMethodCall = MethodCall("init", JSONObject(testConfigurationMap))
+        val initMethodCall = MethodCall("init", testConfigurationMap)
         plugin.onMethodCall(initMethodCall, result)
 
-        val methodCall = MethodCall("setDeviceId", JSONObject(mapOf("instanceName" to "\$default_instance", "properties" to mapOf("setDeviceId" to "testDeviceId"))))
+        val methodCall = MethodCall("setDeviceId", mapOf("instanceName" to "\$default_instance", "properties" to mapOf("setDeviceId" to "testDeviceId")))
         plugin.onMethodCall(methodCall, result)
 
         verify(exactly = 1) { result.success("setDeviceId called..") }
@@ -295,10 +342,10 @@ class AmplitudeFlutterPluginTest {
 
     @Test
     fun shouldReset() {
-        val initMethodCall = MethodCall("init", JSONObject(testConfigurationMap))
+        val initMethodCall = MethodCall("init", testConfigurationMap)
         plugin.onMethodCall(initMethodCall, result)
 
-        val methodCall = MethodCall("reset", JSONObject(mapOf("instanceName" to "\$default_instance")))
+        val methodCall = MethodCall("reset", mapOf("instanceName" to "\$default_instance"))
         plugin.onMethodCall(methodCall, result)
 
         verify(exactly = 1) { result.success("reset called..") }
@@ -306,10 +353,10 @@ class AmplitudeFlutterPluginTest {
 
     @Test
     fun shouldFlush() {
-        val initMethodCall = MethodCall("init", JSONObject(testConfigurationMap))
+        val initMethodCall = MethodCall("init", testConfigurationMap)
         plugin.onMethodCall(initMethodCall, result)
 
-        val methodCall = MethodCall("flush", JSONObject(mapOf("instanceName" to "\$default_instance")))
+        val methodCall = MethodCall("flush", mapOf("instanceName" to "\$default_instance"))
         plugin.onMethodCall(methodCall, result)
 
         verify(exactly = 1) { result.success("flush called..") }

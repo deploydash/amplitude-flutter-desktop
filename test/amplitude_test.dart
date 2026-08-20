@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:amplitude_flutter/amplitude.dart';
 import 'package:amplitude_flutter/configuration.dart';
 import 'package:amplitude_flutter/constants.dart';
@@ -5,6 +7,8 @@ import 'package:amplitude_flutter/events/base_event.dart';
 import 'package:amplitude_flutter/events/event_options.dart';
 import 'package:amplitude_flutter/events/identify.dart';
 import 'package:amplitude_flutter/events/revenue.dart';
+import 'package:flutter/foundation.dart'
+    show TargetPlatform, debugDefaultTargetPlatformOverride, kIsWeb;
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:mockito/annotations.dart';
@@ -22,6 +26,15 @@ void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
   late MockMethodChannel mockChannel;
   late Amplitude amplitude;
+
+  MockMethodChannel buildMockChannel() {
+    final channel = MockMethodChannel();
+    when(channel.codec).thenReturn(const StandardMethodCodec());
+    when(channel.invokeMethod<void>('awaitBuild', any))
+        .thenAnswer((_) async {});
+    return channel;
+  }
+
   final testApiKey = 'test-api-key';
   final testUserId = 'test user id';
   final testDeviceId = 'test device id';
@@ -124,9 +137,8 @@ void main() {
   final testProductId = 'com.company.productId';
 
   setUp(() async {
-    mockChannel = MockMethodChannel();
-    when(mockChannel.invokeListMethod('init', any))
-        .thenAnswer((_) async => null);
+    mockChannel = buildMockChannel();
+    when(mockChannel.invokeMethod<void>('init', any)).thenAnswer((_) async {});
     amplitude = Amplitude(testConfiguration, mockChannel);
     await amplitude.isBuilt;
   });
@@ -446,6 +458,147 @@ void main() {
 
     verify(mockChannel.invokeMethod(
         'flush', {'instanceName': Constants.defaultInstanceName})).called(1);
+  });
+
+  group('Android initialization', () {
+    setUp(() {
+      debugDefaultTargetPlatformOverride = TargetPlatform.android;
+    });
+
+    tearDown(() {
+      debugDefaultTargetPlatformOverride = null;
+    });
+
+    test('drains early calls in order before awaiting native build', () async {
+      mockChannel = buildMockChannel();
+      final initCompleter = Completer<void>();
+      final buildCompleter = Completer<void>();
+      final dispatchOrder = <String>[];
+      final dispatchedInstanceNames = <String>[];
+      final configuration = Configuration(
+        apiKey: testApiKey,
+        instanceName: 'original-instance',
+      );
+
+      when(mockChannel.invokeMethod<void>('init', any))
+          .thenAnswer((_) => initCompleter.future);
+      when(mockChannel.invokeMethod<void>('track', any))
+          .thenAnswer((invocation) async {
+        final arguments =
+            invocation.positionalArguments[1] as Map<dynamic, dynamic>;
+        final event = arguments['event'] as Map<dynamic, dynamic>;
+        dispatchOrder.add('track:${event['event_type']}');
+        dispatchedInstanceNames.add(arguments['instanceName'] as String);
+      });
+      when(mockChannel.invokeMethod<void>('setUserId', any))
+          .thenAnswer((invocation) async {
+        dispatchOrder.add('setUserId');
+        final arguments =
+            invocation.positionalArguments[1] as Map<dynamic, dynamic>;
+        dispatchedInstanceNames.add(arguments['instanceName'] as String);
+      });
+      when(mockChannel.invokeMethod<void>('awaitBuild', any))
+          .thenAnswer((invocation) {
+        dispatchOrder.add('awaitBuild');
+        final arguments =
+            invocation.positionalArguments[1] as Map<dynamic, dynamic>;
+        dispatchedInstanceNames.add(arguments['instanceName'] as String);
+        return buildCompleter.future;
+      });
+      amplitude = Amplitude(configuration, mockChannel);
+
+      final setUserId = amplitude.setUserId(testUserId);
+      final track = amplitude.track(BaseEvent('early'));
+      var isBuiltCompleted = false;
+      unawaited(amplitude.isBuilt.then((_) => isBuiltCompleted = true));
+
+      configuration.instanceName = 'mutated-instance';
+      verifyNever(mockChannel.invokeMethod<void>('setUserId', any));
+      verifyNever(mockChannel.invokeMethod<void>('track', any));
+
+      initCompleter.complete();
+      await untilCalled(mockChannel.invokeMethod<void>('awaitBuild', any));
+      await Future.wait<void>([setUserId, track]);
+
+      expect(dispatchOrder, ['setUserId', 'track:early', 'awaitBuild']);
+      expect(dispatchedInstanceNames, everyElement('original-instance'));
+      expect(isBuiltCompleted, isFalse);
+
+      buildCompleter.complete();
+      expect(await amplitude.isBuilt, isTrue);
+    });
+
+    test('registration failure rejects calls without dispatching', () async {
+      mockChannel = buildMockChannel();
+      final initCompleter = Completer<void>();
+      final error = PlatformException(code: 'init-failed');
+      when(mockChannel.invokeMethod<void>('init', any))
+          .thenAnswer((_) => initCompleter.future);
+      amplitude = Amplitude(testConfiguration, mockChannel);
+
+      final trackFuture = amplitude.track(BaseEvent('never dispatched'));
+      final trackExpectation = expectLater(trackFuture, throwsA(same(error)));
+      initCompleter.completeError(error, StackTrace.current);
+
+      expect(await amplitude.isBuilt, isFalse);
+      await trackExpectation;
+      await expectLater(amplitude.flush(), throwsA(same(error)));
+      verifyNever(mockChannel.invokeMethod<void>('track', any));
+      verifyNever(mockChannel.invokeMethod<void>('flush', any));
+    });
+
+    test('native build failure is reported after accepted calls dispatch',
+        () async {
+      mockChannel = buildMockChannel();
+      final initCompleter = Completer<void>();
+      final buildCompleter = Completer<void>();
+      when(mockChannel.invokeMethod<void>('init', any))
+          .thenAnswer((_) => initCompleter.future);
+      when(mockChannel.invokeMethod<void>('awaitBuild', any))
+          .thenAnswer((_) => buildCompleter.future);
+      when(mockChannel.invokeMethod<void>('track', any))
+          .thenAnswer((_) async {});
+      amplitude = Amplitude(testConfiguration, mockChannel);
+
+      final earlyTrack = amplitude.track(BaseEvent('accepted early'));
+      initCompleter.complete();
+      await untilCalled(mockChannel.invokeMethod<void>('awaitBuild', any));
+      await earlyTrack;
+      buildCompleter.completeError(
+        PlatformException(code: 'amplitude_init_failed'),
+        StackTrace.current,
+      );
+
+      expect(await amplitude.isBuilt, isFalse);
+      await expectLater(
+        amplitude.track(BaseEvent('rejected after failure')),
+        throwsA(isA<PlatformException>().having(
+          (error) => error.code,
+          'code',
+          'amplitude_init_failed',
+        )),
+      );
+      verify(mockChannel.invokeMethod<void>('track', any)).called(1);
+    });
+  }, skip: kIsWeb ? 'Android-only initialization behavior' : false);
+
+  test('non-Android startup calls keep their direct dispatch behavior',
+      () async {
+    mockChannel = buildMockChannel();
+    final initCompleter = Completer<void>();
+    when(mockChannel.invokeMethod<void>('init', any))
+        .thenAnswer((_) => initCompleter.future);
+    when(mockChannel.invokeMethod<void>('track', any)).thenAnswer((_) async {});
+    debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+    addTearDown(() => debugDefaultTargetPlatformOverride = null);
+    amplitude = Amplitude(testConfiguration, mockChannel);
+
+    await amplitude.track(BaseEvent('direct'));
+
+    verify(mockChannel.invokeMethod<void>('track', any)).called(1);
+    verifyNever(mockChannel.invokeMethod<void>('awaitBuild', any));
+    initCompleter.complete();
+    expect(await amplitude.isBuilt, isTrue);
   });
 
   // Reset the mock method call handler after each test
