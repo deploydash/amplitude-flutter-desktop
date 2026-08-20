@@ -1,5 +1,7 @@
 import 'dart:async';
 
+import 'package:flutter/foundation.dart'
+    show TargetPlatform, defaultTargetPlatform, kIsWeb;
 import 'package:flutter/services.dart';
 import 'events/event_options.dart';
 import 'events/identify_event.dart';
@@ -9,15 +11,37 @@ import 'configuration.dart';
 import 'events/base_event.dart';
 import 'events/group_identify_event.dart';
 
+enum _InitializationState { pending, draining, ready, failed }
+
+class _PendingMethodCall {
+  const _PendingMethodCall({
+    required this.dispatch,
+    required this.completeError,
+  });
+
+  final void Function() dispatch;
+  final void Function(Object error, StackTrace stackTrace) completeError;
+}
+
 class Amplitude {
   Configuration configuration;
   MethodChannel _channel = const MethodChannel('amplitude_flutter');
+  late final bool _gateUntilRegistration;
+  _InitializationState _initializationState = _InitializationState.pending;
+  final List<_PendingMethodCall> _pendingMethodCalls = [];
+  Object? _initializationError;
+  StackTrace? _initializationStackTrace;
 
-  /// Whether the Amplitude instance has been successfully initialized
+  /// Whether the Amplitude instance has been successfully initialized.
+  ///
+  /// On Android, this waits for the native SDK's `isBuilt` signal. Calls made
+  /// while the Flutter plugin instance is being registered are buffered in
+  /// call order and handed to the native SDK before this future resolves.
   ///
   /// ```
   /// var amplitude = Amplitude(Configuration(apiKey: 'apiKey'));
-  /// // If care about init complete
+  /// // Await when the application needs Android's native initialization to be
+  /// // complete or needs to inspect whether initialization succeeded.
   /// await amplitude.isBuilt;
   /// ```
   late Future<bool> isBuilt;
@@ -26,23 +50,135 @@ class Amplitude {
   ///
   /// ```
   /// final amplitude = Amplitude(Configuration(apiKey: 'apiKey'));
-  /// // If care about init complete
+  /// // Await when the application needs Android's native initialization to be
+  /// // complete or needs to inspect whether initialization succeeded.
   /// await amplitude.isBuilt;
   /// ```
   Amplitude(this.configuration, [MethodChannel? methodChannel]) {
     _channel = methodChannel ?? _channel;
+    _gateUntilRegistration =
+        !kIsWeb && defaultTargetPlatform == TargetPlatform.android;
     isBuilt = _init();
   }
 
-  /// Private method to initialize and return a `Future<bool>`
   Future<bool> _init() async {
+    final initializedInstanceName = configuration.instanceName;
     try {
-      await _channel.invokeMethod('init', configuration.toMap());
-      return true; // Initialization successful
-    } catch (e) {
-      print('Error initializing Amplitude: $e');
-      return false; // Initialization failed
+      await _channel.invokeMethod<void>('init', configuration.toMap());
+
+      if (!_gateUntilRegistration) {
+        return true;
+      }
+
+      // Android's init reply means the plugin instance is registered and can
+      // accept calls. Hand off buffered calls before waiting for the native
+      // build so identity/event ordering remains compatible with the Android
+      // SDK's own pre-build queue.
+      _drainPendingMethodCalls();
+      await _channel.invokeMethod<void>('awaitBuild', {
+        'instanceName': initializedInstanceName,
+      });
+      return true;
+    } catch (error, stackTrace) {
+      print('Error initializing Amplitude: $error');
+      if (_gateUntilRegistration) {
+        if (_initializationState == _InitializationState.ready) {
+          _markInitializationFailed(error, stackTrace);
+        } else if (_initializationState != _InitializationState.failed) {
+          _completePendingMethodCallsWithError(error, stackTrace);
+        }
+      }
+      return false;
     }
+  }
+
+  /// On Android, buffers platform methods in call order until `init` confirms
+  /// that the plugin instance is registered.
+  ///
+  /// Other platforms continue to use MethodChannel directly, preserving their
+  /// existing startup behavior. A registration failure rejects buffered and
+  /// later calls; a native-build failure rejects subsequent calls.
+  Future<T?> _invokeMethod<T>(String method, Object? arguments) {
+    if (!_gateUntilRegistration ||
+        _initializationState == _InitializationState.ready) {
+      return _channel.invokeMethod<T>(method, arguments);
+    }
+
+    if (_initializationState == _InitializationState.failed) {
+      return Future<T?>.error(
+        _initializationError!,
+        _initializationStackTrace!,
+      );
+    }
+
+    final completer = Completer<T?>();
+    final argumentsSnapshot = _snapshot(method, arguments);
+
+    _pendingMethodCalls.add(_PendingMethodCall(
+      dispatch: () =>
+          _dispatchPendingMethodCall(method, argumentsSnapshot, completer),
+      completeError: completer.completeError,
+    ));
+
+    return completer.future;
+  }
+
+  void _drainPendingMethodCalls() {
+    _initializationState = _InitializationState.draining;
+
+    // A dispatch can synchronously enqueue another call in tests or custom
+    // channel implementations. Reading length on each iteration preserves FIFO
+    // for those reentrant calls too.
+    for (var index = 0; index < _pendingMethodCalls.length; index++) {
+      _pendingMethodCalls[index].dispatch();
+    }
+
+    _pendingMethodCalls.clear();
+    _initializationState = _InitializationState.ready;
+  }
+
+  void _completePendingMethodCallsWithError(
+    Object error,
+    StackTrace stackTrace,
+  ) {
+    _markInitializationFailed(error, stackTrace);
+    for (final pendingMethodCall in _pendingMethodCalls) {
+      pendingMethodCall.completeError(error, stackTrace);
+    }
+    _pendingMethodCalls.clear();
+  }
+
+  void _markInitializationFailed(Object error, StackTrace stackTrace) {
+    _initializationState = _InitializationState.failed;
+    _initializationError = error;
+    _initializationStackTrace = stackTrace;
+  }
+
+  void _dispatchPendingMethodCall<T>(
+    String method,
+    Object? arguments,
+    Completer<T?> completer,
+  ) {
+    try {
+      final invocation = _channel.invokeMethod<T>(method, arguments);
+      unawaited(invocation.then<void>(
+        completer.complete,
+        onError: (Object error, StackTrace stackTrace) {
+          completer.completeError(error, stackTrace);
+        },
+      ));
+    } catch (error, stackTrace) {
+      completer.completeError(error, stackTrace);
+    }
+  }
+
+  /// Android calls deferred during plugin registration must observe values as
+  /// they were when the public method was called, just as an immediate channel
+  /// invocation would. Round-trip through the channel's own codec so injected
+  /// or custom channels keep their existing serialization behavior.
+  Object? _snapshot(String method, Object? value) {
+    final encoded = _channel.codec.encodeMethodCall(MethodCall(method, value));
+    return _channel.codec.decodeMethodCall(encoded).arguments;
   }
 
   /// Tracks an event. Events are saved locally.
@@ -61,7 +197,7 @@ class Amplitude {
       event.mergeEventOptions(options);
     }
 
-    return await _channel.invokeMethod('track',
+    return await _invokeMethod<void>('track',
         {'instanceName': configuration.instanceName, 'event': event.toMap()});
   }
 
@@ -94,7 +230,7 @@ class Amplitude {
       }
     }
 
-    return await _channel.invokeMethod('identify',
+    return await _invokeMethod<void>('identify',
         {'instanceName': configuration.instanceName, 'event': event.toMap()});
   }
 
@@ -126,7 +262,7 @@ class Amplitude {
       event.mergeEventOptions(options);
     }
 
-    return await _channel.invokeMethod('groupIdentify',
+    return await _invokeMethod<void>('groupIdentify',
         {'instanceName': configuration.instanceName, 'event': event.toMap()});
   }
 
@@ -159,7 +295,7 @@ class Amplitude {
       event.mergeEventOptions(options);
     }
 
-    return await _channel.invokeMethod('setGroup',
+    return await _invokeMethod<void>('setGroup',
         {'instanceName': configuration.instanceName, 'event': event.toMap()});
   }
 
@@ -183,7 +319,7 @@ class Amplitude {
       event.mergeEventOptions(options);
     }
 
-    return await _channel.invokeMethod('revenue',
+    return await _invokeMethod<void>('revenue',
         {'instanceName': configuration.instanceName, 'event': event.toMap()});
   }
 
@@ -192,7 +328,7 @@ class Amplitude {
   /// final userId = await amplitude.getUserId();
   /// ```
   Future<String?> getUserId() async {
-    return await _channel.invokeMethod(
+    return await _invokeMethod<String>(
         'getUserId', {'instanceName': configuration.instanceName});
   }
 
@@ -208,7 +344,7 @@ class Amplitude {
     Map<String, String?> properties = {};
     properties['setUserId'] = userId;
 
-    return await _channel.invokeMethod('setUserId',
+    return await _invokeMethod<void>('setUserId',
         {'instanceName': configuration.instanceName, 'properties': properties});
   }
 
@@ -218,7 +354,7 @@ class Amplitude {
   /// final deviceId = await amplitude.getDeviceId();
   /// ```
   Future<String?> getDeviceId() async {
-    return await _channel.invokeMethod(
+    return await _invokeMethod<String>(
         'getDeviceId', {'instanceName': configuration.instanceName});
   }
 
@@ -233,7 +369,7 @@ class Amplitude {
     Map<String, String?> properties = {};
     properties['setDeviceId'] = deviceId;
 
-    return await _channel.invokeMethod('setDeviceId',
+    return await _invokeMethod<void>('setDeviceId',
         {'instanceName': configuration.instanceName, 'properties': properties});
   }
 
@@ -243,7 +379,7 @@ class Amplitude {
   /// final sessionId = await amplitude.getSessionId();
   /// ```
   Future<int?> getSessionId() async {
-    return await _channel.invokeMethod(
+    return await _invokeMethod<int>(
         'getSessionId', {'instanceName': configuration.instanceName});
   }
 
@@ -255,7 +391,7 @@ class Amplitude {
     Map<String, bool> properties = {};
     properties['setOptOut'] = enabled;
 
-    return await _channel.invokeMethod('setOptOut',
+    return await _invokeMethod<void>('setOptOut',
         {'instanceName': configuration.instanceName, 'properties': properties});
   }
 
@@ -263,13 +399,13 @@ class Amplitude {
   ///
   /// Note different devices on different platforms should have different device Ids.
   Future<void> reset() async {
-    return await _channel
-        .invokeMethod('reset', {'instanceName': configuration.instanceName});
+    return await _invokeMethod<void>(
+        'reset', {'instanceName': configuration.instanceName});
   }
 
   /// Flush events in storage.
   Future<void> flush() async {
-    return await _channel
-        .invokeMethod('flush', {'instanceName': configuration.instanceName});
+    return await _invokeMethod<void>(
+        'flush', {'instanceName': configuration.instanceName});
   }
 }

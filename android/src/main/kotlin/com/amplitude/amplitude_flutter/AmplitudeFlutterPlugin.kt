@@ -39,8 +39,14 @@ class AmplitudeFlutterPlugin : FlutterPlugin, MethodCallHandler, ActivityAware {
 
     private val mainHandler = Handler(Looper.getMainLooper())
 
+    internal var registerBuildCompletion:
+        (Amplitude, (Throwable?) -> Unit) -> Unit = { amplitude, callback ->
+            amplitude.isBuilt.invokeOnCompletion(callback)
+        }
+
     companion object {
         private const val methodChannelName = "amplitude_flutter"
+        private const val initializationErrorCode = "amplitude_init_failed"
 
         /**
          * Returns an Amplitude instance by its instance name.
@@ -121,6 +127,31 @@ class AmplitudeFlutterPlugin : FlutterPlugin, MethodCallHandler, ActivityAware {
         val amplitude = instances[instanceName] ?: throw IllegalArgumentException("Amplitude instance $instanceName not found")
 
         when (call.method) {
+            "awaitBuild" -> {
+                // The init reply above intentionally acknowledges plugin
+                // registration so startup calls can retain their existing
+                // ordering and enter the Android SDK's pre-build queue. This
+                // separate barrier makes Dart's public isBuilt future reflect
+                // the native SDK's actual build completion.
+                registerBuildCompletion(amplitude) { exception ->
+                    mainHandler.post {
+                        if (exception == null) {
+                            result.success(true)
+                        } else {
+                            amplitude.logger.warn("Amplitude build did not complete: ${exception.message}")
+                            if (instances[instanceName] === amplitude) {
+                                instances -= instanceName
+                            }
+                            result.error(
+                                initializationErrorCode,
+                                "Amplitude initialization failed.",
+                                exception.toString()
+                            )
+                        }
+                    }
+                }
+            }
+
             "track", "identify", "groupIdentify", "setGroup", "revenue" -> {
                 val event = getEvent(call)
                 amplitude.track(event)

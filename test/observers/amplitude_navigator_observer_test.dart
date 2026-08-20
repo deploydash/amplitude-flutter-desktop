@@ -1,8 +1,13 @@
+import 'dart:async';
+
 import 'package:amplitude_flutter/amplitude.dart';
 import 'package:amplitude_flutter/autocapture/autocapture.dart';
 import 'package:amplitude_flutter/configuration.dart';
 import 'package:amplitude_flutter/observers/amplitude_navigator_observer.dart';
+import 'package:flutter/foundation.dart'
+    show TargetPlatform, debugDefaultTargetPlatformOverride, kIsWeb;
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:mockito/mockito.dart';
 
@@ -19,8 +24,16 @@ void main() {
 
   late MockMethodChannel mockChannel;
 
+  MockMethodChannel buildMockChannel() {
+    final channel = MockMethodChannel();
+    when(channel.codec).thenReturn(const StandardMethodCodec());
+    when(channel.invokeMethod<void>('awaitBuild', any))
+        .thenAnswer((_) async {});
+    return channel;
+  }
+
   Amplitude buildAmplitude(Autocapture autocapture) {
-    mockChannel = MockMethodChannel();
+    mockChannel = buildMockChannel();
     when(mockChannel.invokeMethod('init', any)).thenAnswer((_) async => null);
     when(mockChannel.invokeMethod('track', any)).thenAnswer((_) async => null);
     return Amplitude(
@@ -35,17 +48,18 @@ void main() {
       );
 
   Map<String, dynamic> capturedTrackEvent() {
-    final args =
-        verify(mockChannel.invokeMethod('track', captureAny)).captured.single
-            as Map;
+    final args = verify(mockChannel.invokeMethod('track', captureAny))
+        .captured
+        .single as Map;
     return (args['event'] as Map).cast<String, dynamic>();
   }
 
   group('AmplitudeNavigatorObserver', () {
-    test('didPush tracks a screen view for the pushed route', () {
+    test('didPush tracks a screen view for the pushed route', () async {
       final amplitude =
           buildAmplitude(const AutocaptureOptions(screenViews: true));
       final observer = AmplitudeNavigatorObserver(amplitude);
+      await amplitude.isBuilt;
 
       observer.didPush(pageRoute('/home'), null);
 
@@ -54,10 +68,11 @@ void main() {
       expect(event['event_properties'], {screenNameProperty: '/home'});
     });
 
-    test('didReplace tracks the new route', () {
+    test('didReplace tracks the new route', () async {
       final amplitude =
           buildAmplitude(const AutocaptureOptions(screenViews: true));
       final observer = AmplitudeNavigatorObserver(amplitude);
+      await amplitude.isBuilt;
 
       observer.didReplace(
         newRoute: pageRoute('/new'),
@@ -68,10 +83,11 @@ void main() {
       expect(event['event_properties'], {screenNameProperty: '/new'});
     });
 
-    test('didPop tracks the revealed previous route', () {
+    test('didPop tracks the revealed previous route', () async {
       final amplitude =
           buildAmplitude(const AutocaptureOptions(screenViews: true));
       final observer = AmplitudeNavigatorObserver(amplitude);
+      await amplitude.isBuilt;
 
       observer.didPop(pageRoute('/top'), pageRoute('/below'));
 
@@ -94,9 +110,10 @@ void main() {
       verifyNever(mockChannel.invokeMethod('track', any));
     });
 
-    test('AutocaptureEnabled enables screen view capture', () {
+    test('AutocaptureEnabled enables screen view capture', () async {
       final amplitude = buildAmplitude(const AutocaptureEnabled());
       final observer = AmplitudeNavigatorObserver(amplitude);
+      await amplitude.isBuilt;
 
       observer.didPush(pageRoute('/home'), null);
 
@@ -144,13 +161,14 @@ void main() {
       verifyNever(mockChannel.invokeMethod('track', any));
     });
 
-    test('uses a custom nameExtractor when provided', () {
+    test('uses a custom nameExtractor when provided', () async {
       final amplitude =
           buildAmplitude(const AutocaptureOptions(screenViews: true));
       final observer = AmplitudeNavigatorObserver(
         amplitude,
         nameExtractor: (settings) => 'screen:${settings.name}',
       );
+      await amplitude.isBuilt;
 
       observer.didPush(pageRoute('/home'), null);
 
@@ -163,6 +181,7 @@ void main() {
       final amplitude =
           buildAmplitude(const AutocaptureOptions(screenViews: true));
       final observer = AmplitudeNavigatorObserver(amplitude);
+      await amplitude.isBuilt;
 
       await tester.pumpWidget(MaterialApp(
         navigatorObservers: [observer],
@@ -179,8 +198,8 @@ void main() {
       await tester.pumpAndSettle();
 
       // Initial route is tracked on first frame.
-      expect(capturedTrackEvent()['event_properties'],
-          {screenNameProperty: '/'});
+      expect(
+          capturedTrackEvent()['event_properties'], {screenNameProperty: '/'});
 
       clearInteractions(mockChannel);
       await tester.tap(find.text('Go'));
@@ -190,16 +209,54 @@ void main() {
           {screenNameProperty: '/details'});
     });
 
+    test('holds the initial route until Android registration completes',
+        () async {
+      debugDefaultTargetPlatformOverride = TargetPlatform.android;
+      addTearDown(() => debugDefaultTargetPlatformOverride = null);
+      mockChannel = buildMockChannel();
+      final initCompleter = Completer<void>();
+      final buildCompleter = Completer<void>();
+      final trackDispatched = Completer<void>();
+      when(mockChannel.invokeMethod<void>('init', any))
+          .thenAnswer((_) => initCompleter.future);
+      when(mockChannel.invokeMethod<void>('awaitBuild', any))
+          .thenAnswer((_) => buildCompleter.future);
+      when(mockChannel.invokeMethod<void>('track', any)).thenAnswer((_) async {
+        trackDispatched.complete();
+      });
+      final amplitude = Amplitude(
+        Configuration(
+          apiKey: 'k',
+          autocapture: const AutocaptureOptions(screenViews: true),
+        ),
+        mockChannel,
+      );
+      final observer = AmplitudeNavigatorObserver(amplitude);
+
+      observer.didPush(pageRoute('/'), null);
+      verifyNever(mockChannel.invokeMethod<void>('track', any));
+
+      initCompleter.complete();
+      await trackDispatched.future;
+
+      final event = capturedTrackEvent();
+      expect(event['event_properties'], {screenNameProperty: '/'});
+
+      buildCompleter.complete();
+      expect(await amplitude.isBuilt, isTrue);
+    }, skip: kIsWeb ? 'Android-only initialization behavior' : false);
+
     test('a failing track never breaks navigation', () async {
       final amplitude =
           buildAmplitude(const AutocaptureOptions(screenViews: true));
+      await amplitude.isBuilt;
       when(mockChannel.invokeMethod('track', any))
           .thenThrow(Exception('track boom'));
       final observer = AmplitudeNavigatorObserver(amplitude);
 
       expect(() => observer.didPush(pageRoute('/home'), null), returnsNormally);
-      // Let the rejected track future settle; the observer handles it.
-      await Future<void>.delayed(Duration.zero);
+      // Let the handled rejected future settle before the test completes.
+      await Future<void>.value();
     });
 
     test('a throwing nameExtractor never breaks navigation', () {
