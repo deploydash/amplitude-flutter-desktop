@@ -26,3 +26,7 @@ jobs:
 
       - name: Test
         run: flutter test
+
+      - name: Test example startup probe
+        working-directory: example
+        run: flutter test
