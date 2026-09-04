@@ -1,0 +1,165 @@
+import 'dart:async';
+
+import 'package:flutter/services.dart';
+
+import '../constants.dart';
+import 'desktop_backend.dart';
+
+// `MethodChannel` handler for the pure-Dart desktop backend (plan §1.6/H.8).
+//
+// WHY this file exists: Linux and Windows have no native Amplitude SDK, so
+// the generated registrant routes the shared `amplitude_flutter` channel to
+// this Dart implementation (via the `linux:`/`windows:` `dartPluginClass`
+// entries in pubspec.yaml) instead of leaving it unhandled. The shape mirrors
+// `amplitude_web.dart`'s `registerWith` + `handleMethodCall`; `lib/
+// amplitude.dart` is untouched, so no caller changes.
+//
+// SCOPE: the channel carries the 14 methods `Amplitude` invokes
+// (init/track/identify/groupIdentify/setGroup/revenue/getUserId/setUserId/
+// getDeviceId/setDeviceId/getSessionId/setOptOut/reset/flush). Terminal
+// per-event outcomes are config-level only (`DesktopBackend.onTerminalEvent`,
+// plan §H.9): callbacks cannot cross a `MethodChannel`, so channel users get
+// diagnostic logs, while direct `DesktopBackend` users get callbacks.
+
+/// Creates the [DesktopBackend] for one `init` call. Tests inject a factory
+/// with in-memory storage and a scripted HTTP client.
+typedef DesktopBackendFactory = DesktopBackend Function();
+
+class DesktopAmplitudePlugin {
+  DesktopAmplitudePlugin({DesktopBackendFactory? backendFactory})
+      : _backendFactory = backendFactory ?? DesktopBackend.new;
+
+  final DesktopBackendFactory _backendFactory;
+
+  /// Backends by `instanceName`. Visible for tests.
+  final Map<String, DesktopBackend> instances = {};
+
+  /// The plugin currently serving the channel. Hot restart re-runs the
+  /// registrant without killing the isolate, so a second `registerWith`
+  /// must retire the first plugin's backends (their 30 s flush timers
+  /// would otherwise keep firing against the same store namespace and
+  /// upload every file twice).
+  static DesktopAmplitudePlugin? _activePlugin;
+
+  /// Called by the generated registrant on Linux/Windows (zero-arg shape
+  /// verified against the Flutter tool's `flutter_plugins.dart`).
+  static void registerWith() {
+    final previous = _activePlugin;
+    final next = DesktopAmplitudePlugin();
+    _activePlugin = next;
+    const MethodChannel('amplitude_flutter')
+        .setMethodCallHandler(next.handleMethodCall);
+    if (previous != null) {
+      for (final backend in previous.instances.values) {
+        unawaited(backend.dispose());
+      }
+      previous.instances.clear();
+    }
+  }
+
+  /// Handles method calls over the `MethodChannel` of this plugin.
+  Future<dynamic> handleMethodCall(MethodCall call) async {
+    if (call.method == 'init') {
+      final args = Map<String, dynamic>.from(call.arguments as Map);
+      final backend = _backendFactory();
+      final ok = await backend.init(args);
+      if (!ok) {
+        // Refused (no usable apiKey): never stored, queue stays untouched.
+        await backend.dispose();
+        return null;
+      }
+      final rawKey = args['instanceName'];
+      final key = rawKey is String && rawKey.isNotEmpty
+          ? rawKey
+          : Constants.defaultInstanceName;
+      // Re-init replaces the backend: dispose the old one first so its
+      // flush timer stops firing against the same store namespace (which
+      // would otherwise upload every file twice).
+      final previous = instances[key];
+      if (previous != null) {
+        await previous.dispose();
+      }
+      instances[key] = backend;
+      return null;
+    }
+
+    final rawLookup = (call.arguments as Map)['instanceName'];
+    final backend = instances[
+        rawLookup is String ? rawLookup : Constants.defaultInstanceName];
+    if (backend == null) {
+      // No init yet for this instance: reads resolve null/-1 and never hang
+      // (the Android `isBuilt` gate analog); writes drop silently.
+      switch (call.method) {
+        case 'getUserId':
+        case 'getDeviceId':
+          return null;
+        case 'getSessionId':
+          return -1;
+        case 'track':
+        case 'identify':
+        case 'groupIdentify':
+        case 'setGroup':
+        case 'revenue':
+        case 'setUserId':
+        case 'setDeviceId':
+        case 'setOptOut':
+        case 'reset':
+        case 'flush':
+          return null;
+        default:
+          throw PlatformException(
+            code: 'Unimplemented',
+            details:
+                "The amplitude_flutter plugin for desktop doesn't implement the method '${call.method}'",
+          );
+      }
+    }
+
+    switch (call.method) {
+      case 'track':
+        return backend.track(_eventArgs(call));
+      case 'identify':
+        return backend.identify(_eventArgs(call));
+      case 'groupIdentify':
+        return backend.groupIdentify(_eventArgs(call));
+      case 'setGroup':
+        return backend.setGroup(_eventArgs(call));
+      case 'revenue':
+        return backend.revenue(_eventArgs(call));
+      case 'getUserId':
+        return backend.getUserId();
+      case 'setUserId':
+        return backend.setUserId(
+          (call.arguments as Map)['properties']['setUserId'] as String?,
+        );
+      case 'getDeviceId':
+        return backend.getDeviceId();
+      case 'setDeviceId':
+        return backend.setDeviceId(
+          (call.arguments as Map)['properties']['setDeviceId'] as String?,
+        );
+      case 'getSessionId':
+        return backend.getSessionId();
+      case 'setOptOut':
+        return backend.setOptOut(
+          (call.arguments as Map)['properties']['setOptOut'] as bool,
+        );
+      case 'reset':
+        return backend.reset();
+      case 'flush':
+        return backend.flush();
+      default:
+        throw PlatformException(
+          code: 'Unimplemented',
+          details:
+              "The amplitude_flutter plugin for desktop doesn't implement the method '${call.method}'",
+        );
+    }
+  }
+
+  Map<String, dynamic> _eventArgs(MethodCall call) {
+    return Map<String, dynamic>.from(
+      (call.arguments as Map)['event'] as Map,
+    );
+  }
+}

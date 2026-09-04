@@ -1,7 +1,7 @@
 include: package:lints/recommended.yaml
 
 analyzer:
-  exclude: [lib/amplitude_web.dart, lib/web/amplitude_js.dart] # Uncomment when web is supported
+  exclude: [lib/amplitude_web.dart, lib/web/amplitude_js.dart, build/**, android/**, ios/**, web/**, windows/**, macos/**, linux/**] # Uncomment when web is supported
 
 linter:
   rules:

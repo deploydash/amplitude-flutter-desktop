@@ -1,3 +1,14 @@
+## Unreleased
+
+### Features
+
+* **desktop:** pure-Dart Linux/Windows backend speaking HTTP ingestion
+  directly (`lib/desktop/`, `DesktopAmplitudePlugin` via `dartPluginClass`).
+  Same 14-method channel API, batched upload (30 events / 30 s), durable
+  `shared_preferences` queue with quarantine, persisted identity/sessions,
+  `$identify` batching, and config-level terminal callbacks. No new policy:
+  consent stays host-owned via `optOut`/`setOptOut` and `flush()`.
+
 ## [4.7.1](https://github.com/amplitude/Amplitude-Flutter/compare/v4.7.0...v4.7.1) (2026-08-11)
 
 
