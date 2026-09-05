@@ -395,6 +395,28 @@ void main() {
       expect(identify.containsKey('time'), isTrue);
     });
 
+    test('out-of-session event uploads without session events', () async {
+      final backend = await makeBackend();
+      await backend.track({'event_type': 'x', 'session_id': -1});
+      await backend.flush();
+
+      expect(requests, hasLength(1));
+      final payload = decodeUpload(requests.single);
+      final events = payload['events'] as List;
+      expect(
+        events.map((e) => (e as Map)['event_type']),
+        ['x'],
+        reason: 'sentinel must not emit session_start',
+      );
+      final main = events.single as Map;
+      expect(main['session_id'], -1);
+      expect(main.containsKey('time'), isTrue);
+      expect(main['event_id'], isNotNull);
+      expect(main['device_id'], isNotNull);
+      expect(main['platform'], 'Linux');
+      expect(await backend.getSessionId(), -1);
+    });
+
     test('rapid funnel tracks upload in arrival order', () async {
       final backend = await makeBackend();
       // Deliberately unawaited between calls: the serial chain must still

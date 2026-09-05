@@ -178,6 +178,78 @@ void main() {
       expect(result.event?['session_id'], 555);
     });
 
+    test('out-of-session sentinel starts nothing on first event', () async {
+      final session = await makeSession(storage: storage, clock: clock);
+      final result = await session.processEvent(
+        {'event_type': 'x', 'session_id': -1},
+        inForeground: true,
+      );
+
+      expect(result.preceding, isEmpty);
+      expect(session.sessionId, -1);
+      expect(result.event?['session_id'], -1);
+      expect(await storage.readInt(DesktopStoreKeys.sessionId), isNull,
+          reason: 'sentinel must not persist a session');
+      expect(await storage.readInt(DesktopStoreKeys.lastEventTime), isNull,
+          reason: 'sentinel must not stamp event time');
+    });
+
+    test('out-of-session event leaves active session untouched', () async {
+      final session = await makeSession(storage: storage, clock: clock);
+      await session.processEvent(event(), inForeground: true);
+      final activeId = session.sessionId;
+      final activeTime = await storage.readInt(DesktopStoreKeys.lastEventTime);
+
+      clock.nowMs += 500;
+      final result = await session.processEvent(
+        {'event_type': 'x', 'session_id': -1},
+        inForeground: true,
+      );
+
+      expect(result.preceding, isEmpty);
+      expect(result.event?['session_id'], -1);
+      expect(session.sessionId, activeId);
+      expect(await storage.readInt(DesktopStoreKeys.sessionId), activeId);
+      expect(await storage.readInt(DesktopStoreKeys.lastEventTime), activeTime);
+    });
+
+    test('out-of-session event does not rotate past the gap', () async {
+      final session =
+          await makeSession(storage: storage, clock: clock, gapMs: 1000);
+      await session.processEvent(event(), inForeground: true);
+      final activeId = session.sessionId;
+
+      clock.nowMs += 5000;
+      final result = await session.processEvent(
+        {'event_type': 'x', 'session_id': -1},
+        inForeground: false,
+      );
+
+      expect(result.preceding, isEmpty);
+      expect(session.sessionId, activeId);
+
+      // The next normal event behaves as if the sentinel never happened:
+      // it still rotates past the original gap and emits end/start.
+      clock.nowMs += 100;
+      final next = await session.processEvent(event(), inForeground: false);
+      expect(
+        next.preceding.map((e) => e['event_type']),
+        ['session_end', 'session_start'],
+      );
+    });
+
+    test('out-of-session event still gets ids and timestamp', () async {
+      final session = await makeSession(storage: storage, clock: clock);
+      final result = await session.processEvent(
+        {'event_type': 'x', 'session_id': -1},
+        inForeground: true,
+      );
+
+      expect(result.event?['timestamp'], clock.nowMs);
+      expect(result.event?['session_id'], -1);
+      expect(result.event?['event_id'], isNotNull);
+    });
+
     test('explicit per-event event id is kept without bumping the sequence',
         () async {
       final session = await makeSession(storage: storage, clock: clock);

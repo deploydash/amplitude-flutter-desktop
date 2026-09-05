@@ -98,10 +98,16 @@ class DesktopSession {
     } else if (type != 'session_end') {
       // Every ordinary event evaluates extend-vs-new — that is what starts
       // the very first session. An explicitly-set per-event id only
-      // changes what the event keeps afterwards (Swift checks the -1
-      // sentinel here; in Dart, null means absent — same effect).
-      preceding.addAll(
-          await _startNewSessionIfNeeded(ts, inForeground: inForeground));
+      // changes what the event keeps afterwards, except the -1 out-of-session
+      // sentinel (Swift `Sessions.swift` skips session mutation for it): it
+      // is enqueued with ids but never starts, extends, or rotates a session.
+      final rawSidForSentinel = event['session_id'];
+      final isOutOfSession = rawSidForSentinel is num &&
+          rawSidForSentinel.toInt() == -1;
+      if (!isOutOfSession) {
+        preceding.addAll(
+            await _startNewSessionIfNeeded(ts, inForeground: inForeground));
+      }
     }
     // `session_end` passes through with no state change (§C.2 step 3).
 
