@@ -531,20 +531,49 @@ void main() {
     });
 
     test('429 throttles uploads for 30 s without data loss', () async {
+      // Historical 30 s throttle removed in T-7: 429 now uses the same
+      // ordered whole-file retry as other retryable failures.
       final backend = await makeBackend();
       await backend.track({'event_type': 'a'});
-      script.add(() => http.Response('{"throttledEvents": [0, 1]}', 429));
+      script.add(() => http.Response('{"throttled_events": [0, 1]}', 429));
       await backend.flush();
-      expect(await storage.listFilesOldestFirst(), hasLength(1));
 
-      // Immediate retry is paused: no new request leaves the SDK.
-      await backend.flush();
-      expect(requests, hasLength(1));
-
-      clock.nowMs += 31 * 1000;
-      await backend.flush();
       expect(requests, hasLength(2));
+      expect(sleeps, [const Duration(seconds: 1)]);
       expect(await storage.listFilesOldestFirst(), isEmpty);
+      expect(terminals.map((t) => t.code), [200, 200]);
+    });
+
+    test('429 retains the whole file and retries it in order', () async {
+      final backend = await makeBackend();
+      await backend.track({'event_type': 'a'});
+      await storage.sealCurrentFile();
+      await backend.track({'event_type': 'b'});
+      const canonical = '{"throttled_events": [0], '
+          '"exceeded_daily_quota_users": {"u1": 1}}';
+      script.add(() => http.Response(canonical, 429));
+      await backend.flush();
+
+      // Oldest 429 retried first: A, A, then B. Nothing dropped.
+      expect(requests, hasLength(3));
+      expect(terminals.map((t) => t.code), [200, 200, 200],
+          reason: 'rate-limited files stay pending, never terminal-drop');
+      expect(await storage.listFilesOldestFirst(), isEmpty);
+      expect(sleeps, [const Duration(seconds: 1)]);
+    });
+
+    test('429 exhaustion keeps every event and trips offline', () async {
+      final backend = await makeBackend(
+        config: configMap(flushMaxRetries: 1),
+      );
+      await backend.track({'event_type': 'a'});
+      script.add(() => http.Response('{"throttled_events": [0]}', 429));
+      script.add(() => http.Response('{"throttled_events": [0]}', 429));
+      await backend.flush();
+
+      expect(requests, hasLength(2));
+      expect(terminals, isEmpty);
+      expect(await storage.listFilesOldestFirst(), hasLength(1));
     });
 
     test('500 then success retries with backoff and recovers', () async {

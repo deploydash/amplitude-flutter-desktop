@@ -46,9 +46,6 @@ class DesktopRetry {
   /// Backstop: files older than this are discarded with a callback — the only
   /// point at which data loss becomes explicit.
   static const maxFileAgeDays = 30;
-
-  /// 429 `throttledEvents` indexes pause uploads for this long.
-  static const throttleSeconds = 30;
 }
 
 /// Smallest identify-batch interval (Swift `Constants.swift:90`).

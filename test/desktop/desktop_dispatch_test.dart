@@ -81,6 +81,18 @@ void main() {
       expect(parts.keep.length, 2);
     });
 
+    test('400 silenced devices nested in maps still match', () {
+      final decision = decideDesktopDispatch(
+        statusCode: 400,
+        responseBody: '{"silenced_devices": {"region": ["device-1"]}}',
+        events: events(2),
+      );
+      final parts =
+          partitionDesktopEvents(events(2), decision as DispatchDropSome);
+      expect(parts.drop.map((e) => e['device_id']), ['device-1']);
+      expect(parts.keep, hasLength(1));
+    });
+
     test('unparseable 400 drops instead of poison-looping', () {
       expect(
         decideDesktopDispatch(
@@ -111,21 +123,45 @@ void main() {
     });
 
     test('429 with quota bodies drops matches and throttles', () {
-      final decision = decideDesktopDispatch(
-        statusCode: 429,
-        responseBody: '{"exceededDailyQuotaUsers": ["user-0"], '
-            '"exceededDailyQuotaDevices": ["device-2"], '
-            '"throttledEvents": [1]}',
-        events: events(3),
+      // Historical camelCase parser removed in T-7: every 429 now retains
+      // the whole file for ordered retry.
+      expect(
+        decideDesktopDispatch(
+          statusCode: 429,
+          responseBody: '{"exceededDailyQuotaUsers": ["user-0"], '
+              '"exceededDailyQuotaDevices": ["device-2"], '
+              '"throttledEvents": [1]}',
+          events: events(3),
+        ),
+        isA<DispatchRetry>(),
       );
-      final drop = decision as DispatchDropSome;
-      expect(drop.throttle, isTrue);
-      expect(drop.throttledIndexes, {1});
-      final parts = partitionDesktopEvents(events(3), drop);
-      // Quota matches drop; the throttled event is kept for retry.
-      expect(parts.drop.length, 2);
-      expect(parts.keep.length, 1);
-      expect(parts.keep.first['event_type'], 'e1');
+    });
+
+    test('canonical 429 bodies retain the whole file for retry', () {
+      const canonical = '{"throttled_events": [0], "throttled_users": ["u1"], '
+          '"throttled_devices": ["d1"], '
+          '"exceeded_daily_quota_users": {"u2": 1}, '
+          '"exceeded_daily_quota_devices": {"d2": 1}}';
+      expect(
+        decideDesktopDispatch(
+          statusCode: 429,
+          responseBody: canonical,
+          events: events(3),
+        ),
+        isA<DispatchRetry>(),
+      );
+    });
+
+    test('legacy quota-drop 429 bodies must also retry without dropping',
+        () {
+      expect(
+        decideDesktopDispatch(
+          statusCode: 429,
+          responseBody: '{"exceededDailyQuotaUsers": ["user-0"]}',
+          events: events(2),
+        ),
+        isA<DispatchRetry>(),
+      );
     });
 
     test('plain 429 retries without dropping', () {
@@ -171,16 +207,17 @@ void main() {
     });
 
     test('429 quota lists nested in maps still match', () {
-      final decision = decideDesktopDispatch(
-        statusCode: 429,
-        responseBody: '{"exceededDailyQuotaDevices": {"region": ["device-1"]}}',
-        events: events(2),
+      // Historical nested-map quota parser removed in T-7: 429 always
+      // retries the whole file.
+      expect(
+        decideDesktopDispatch(
+          statusCode: 429,
+          responseBody:
+              '{"exceededDailyQuotaDevices": {"region": ["device-1"]}}',
+          events: events(2),
+        ),
+        isA<DispatchRetry>(),
       );
-      expect(decision, isA<DispatchDropSome>());
-      final parts =
-          partitionDesktopEvents(events(2), decision as DispatchDropSome);
-      expect(parts.drop.map((e) => e['device_id']), ['device-1']);
-      expect(parts.keep, hasLength(1));
     });
   });
 }

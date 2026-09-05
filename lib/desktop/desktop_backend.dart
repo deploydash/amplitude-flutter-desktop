@@ -197,7 +197,6 @@ class DesktopBackend {
   int _failures = 0;
   int _pendingCount = 0;
   bool _isFlushing = false;
-  int _throttleUntilMs = 0;
   Timer? _flushTimer;
   Timer? _reprobeTimer;
   Future<void> _tail = Future.value();
@@ -236,7 +235,6 @@ class DesktopBackend {
       _failures = 0;
       _pendingCount = 0;
       _isFlushing = false;
-      _throttleUntilMs = 0;
 
       _storage = _injectedStorage ??
           SharedPreferencesDesktopStorage(
@@ -349,11 +347,10 @@ class DesktopBackend {
       // batch survive `reset()` — neither native SDK touches them, so
       // queued events keep the previous identity and drain on the next
       // flush (the interceptor's identity-change path transfers the held
-      // batch first). Same for `_failures`, `_offline`,
-      // `_throttleUntilMs`, and `_pendingCount`: they describe the
-      // transport and queue, not identity. Rotating the device id must not
-      // mask a dead server, clear a 429 pause, or reset the flush
-      // threshold count.
+      // batch first). Same for `_failures`, `_offline`, and `_pendingCount`:
+      // they describe the transport and queue, not identity. Rotating the
+      // device id must not mask a dead server or reset the flush threshold
+      // count.
     });
   }
 
@@ -590,7 +587,7 @@ class DesktopBackend {
     }
     final now = _clock();
     if (!singleAttempt) {
-      if (_offline || now < _throttleUntilMs) {
+      if (_offline) {
         return;
       }
     } else if (!_offline) {
@@ -611,10 +608,9 @@ class DesktopBackend {
       if (combined != null) {
         await _enqueueRaw(combined,
             holdable: false, allowAutoFlush: true);
-        // Re-check transport state before touching the network: an offline
-        // probe that just drained a held identify must not upload on that
-        // cycle.
-        if (_offline || _clock() < _throttleUntilMs) {
+        // Re-check offline before touching the network: an offline probe
+        // that just drained a held identify must not upload on that cycle.
+        if (_offline) {
           return;
         }
       }
@@ -720,11 +716,6 @@ class DesktopBackend {
           } else {
             await storage.writeFile(name,
                 joinDesktopFileContent(parts.keep.map(json.encode).toList()));
-          }
-          if (decision.throttle) {
-            _throttleUntilMs = _clock() + DesktopRetry.throttleSeconds * 1000;
-            _log(2, 'server throttled uploads; pausing for 30 s');
-            return;
           }
           _noteProgress();
         } else if (decision is DispatchSplit) {

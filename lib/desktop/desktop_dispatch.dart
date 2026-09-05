@@ -26,27 +26,19 @@ class DispatchDropFile extends DesktopDispatch {
   final String message;
 }
 
-/// Partial 400 / 429-with-quota: drop the indexed/id-matched events (with
-/// callbacks), requeue the survivors at the pipeline front.
-/// 429 `throttledEvents` are NOT drops: they are kept and retried after a
-/// 30 s upload pause ([throttle] is true exactly then).
+/// Partial 400: drop the indexed/id-matched events (with callbacks),
+/// requeue the survivors at the pipeline front.
 class DispatchDropSome extends DesktopDispatch {
   const DispatchDropSome({
     this.dropIndexes = const {},
     this.dropDeviceIds = const {},
-    this.dropUserIds = const {},
-    this.throttledIndexes = const {},
     required this.code,
     required this.message,
   });
   final Set<int> dropIndexes;
   final Set<String> dropDeviceIds;
-  final Set<String> dropUserIds;
-  final Set<int> throttledIndexes;
   final int code;
   final String message;
-
-  bool get throttle => throttledIndexes.isNotEmpty;
 }
 
 /// Retryable (408 / 429 / 5xx / network error / unknown): leave the file in
@@ -87,7 +79,11 @@ DesktopDispatch decideDesktopDispatch({
     );
   }
   if (statusCode == 429) {
-    return _decideRateLimit(responseBody, events);
+    // Pinned upstream parity: retain the whole oldest file and retry it
+    // through the ordered retry engine. The body is intentionally ignored
+    // (canonical snake_case fixtures in tests guard against reintroducing
+    // camelCase parsing or event dropping).
+    return const DispatchRetry();
   }
   if (statusCode >= 400 && statusCode < 500) {
     return _decideBadRequest(responseBody);
@@ -131,34 +127,6 @@ DesktopDispatch _decideBadRequest(String body) {
     dropDeviceIds: dropDeviceIds,
     code: 400,
     message: error is String && error.isNotEmpty ? error : 'Invalid event',
-  );
-}
-
-DesktopDispatch _decideRateLimit(
-  String body,
-  List<Map<String, dynamic>> events,
-) {
-  Map<String, dynamic>? parsed;
-  try {
-    parsed = json.decode(body) as Map<String, dynamic>?;
-  } catch (_) {
-    parsed = null;
-  }
-  if (parsed == null) {
-    return const DispatchRetry();
-  }
-  final dropUserIds = _flattenStrings(parsed['exceededDailyQuotaUsers']);
-  final dropDeviceIds = _flattenStrings(parsed['exceededDailyQuotaDevices']);
-  final throttled = _flattenIndexes(parsed['throttledEvents']);
-  if (dropUserIds.isEmpty && dropDeviceIds.isEmpty && throttled.isEmpty) {
-    return const DispatchRetry();
-  }
-  return DispatchDropSome(
-    dropDeviceIds: dropDeviceIds,
-    dropUserIds: dropUserIds,
-    throttledIndexes: throttled,
-    code: 429,
-    message: 'Rate limited',
   );
 }
 
@@ -220,10 +188,8 @@ Set<String> _flattenStrings(dynamic node) {
   final drop = <Map<String, dynamic>>[];
   for (var i = 0; i < events.length; i++) {
     final event = events[i];
-    final userId = event['user_id']?.toString();
     final deviceId = event['device_id']?.toString();
     if (decision.dropIndexes.contains(i) ||
-        (userId != null && decision.dropUserIds.contains(userId)) ||
         (deviceId != null && decision.dropDeviceIds.contains(deviceId))) {
       drop.add(event);
     } else {
