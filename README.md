@@ -97,14 +97,14 @@ and drain if you opt back in during the same run.
 
 ## Compatibility
 
-Floors come from `pubspec.yaml`: Dart `>=3.3.0 <4.0.0`, Flutter `>=3.19.0`.
+Floors come from `pubspec.yaml`: Dart `>=3.10.0 <4.0.0`, Flutter `>=3.38.1`.
 Android, iOS, macOS, and web keep their upstream backends; Linux and
 Windows are served by the pure-Dart backend (no extra native toolchain).
 
 | Area            | Requirement                                    |
 |-----------------|------------------------------------------------|
-| Dart            | `>=3.3.0 <4.0.0`                               |
-| Flutter         | `>=3.19.0`                                     |
+| Dart            | `>=3.10.0 <4.0.0`                               |
+| Flutter         | `>=3.38.1`                                     |
 | Web, iOS, Android, MacOS | Supported via the [upstream package](https://pub.dev/packages/amplitude_flutter) | 
 | Linux / Windows |  via `lib/desktop/` |
 

@@ -4,10 +4,14 @@
 
 * **desktop:** pure-Dart Linux/Windows backend speaking HTTP ingestion
   directly (`lib/desktop/`, `DesktopAmplitudePlugin` via `dartPluginClass`).
-  Same 14-method channel API, batched upload (30 events / 30 s), durable
-  `shared_preferences` queue with quarantine, persisted identity/sessions,
-  `$identify` batching, and config-level terminal callbacks. No new policy:
+  Same 14-method channel API, batched upload (30 events / 30 s), crash-safe
+  filesystem queue with quarantine and one-time legacy migration, persisted
+  identity/sessions, `$identify` batching, automatic Flutter lifecycle
+  signals, and config-level terminal callbacks. No new policy:
   consent stays host-owned via `optOut`/`setOptOut` and `flush()`.
+* **desktop:** Linux/Windows support requires Dart `>=3.10.0 <4.0.0` and
+  Flutter `>=3.38.1` (the effective floor of its `device_info_plus`,
+  `package_info_plus`, and `path_provider` dependencies).
 
 ## [4.7.1](https://github.com/amplitude/Amplitude-Flutter/compare/v4.7.0...v4.7.1) (2026-08-11)
 
