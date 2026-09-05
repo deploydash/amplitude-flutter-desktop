@@ -340,6 +340,61 @@ void main() {
       expect(await storage.listFilesOldestFirst(), isEmpty);
     });
 
+    test('uploaded bodies use wire time, never timestamp', () async {
+      final backend = await makeBackend();
+      await backend.track({'event_type': 'a', 'timestamp': 1700000001234});
+      await backend.flush();
+
+      expect(requests, hasLength(1));
+      final payload = decodeUpload(requests.single);
+      final events = payload['events'] as List;
+      expect(events, isNotEmpty);
+      for (final raw in events) {
+        final event = raw as Map;
+        expect(event.containsKey('timestamp'), isFalse,
+            reason: 'wire events must not contain timestamp');
+        expect(event.containsKey('time'), isTrue,
+            reason: 'wire events must contain time');
+      }
+      final main =
+          events.cast<Map>().firstWhere((e) => e['event_type'] == 'a');
+      expect(main['time'], 1700000001234);
+    });
+
+    test('generated session_start uses wire time', () async {
+      final backend = await makeBackend();
+      await backend.track({'event_type': 'a', 'timestamp': 1700000001234});
+      await backend.flush();
+
+      final payload = decodeUpload(requests.single);
+      final events = payload['events'] as List;
+      final start = events.cast<Map>().firstWhere(
+            (e) => e['event_type'] == 'session_start',
+          );
+      expect(start.containsKey('timestamp'), isFalse);
+      expect(start['time'], 1700000001234);
+    });
+
+    test('transferred identify uses wire time', () async {
+      final backend = await makeBackend();
+      await backend.identify({
+        'event_type': r'$identify',
+        'user_properties': {
+          r'$set': {'plan': 'pro'}
+        },
+      });
+      await backend.track({'event_type': 'trigger'});
+      await backend.flush();
+
+      final payload = decodeUpload(requests.single);
+      final events = payload['events'] as List;
+      final identify = events.cast<Map>().firstWhere(
+            (e) => e['event_type'] == r'$identify',
+          );
+      expect(identify.containsKey('timestamp'), isFalse);
+      expect(identify.containsKey('time'), isTrue);
+    });
+
     test('rapid funnel tracks upload in arrival order', () async {
       final backend = await makeBackend();
       // Deliberately unawaited between calls: the serial chain must still

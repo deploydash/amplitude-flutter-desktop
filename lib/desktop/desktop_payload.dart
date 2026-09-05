@@ -13,7 +13,7 @@ Map<String, dynamic> buildDesktopPayload({
   final payload = <String, dynamic>{
     'api_key': apiKey,
     'client_upload_time': clientUploadTime,
-    'events': events,
+    'events': [for (final event in events) toDesktopWireEvent(event)],
   };
   if (minIdLength != null) {
     payload['options'] = {'min_id_length': minIdLength};
@@ -25,6 +25,24 @@ Map<String, dynamic> buildDesktopPayload({
 String formatDesktopUploadTime(int msSinceEpoch) {
   return DateTime.fromMillisecondsSinceEpoch(msSinceEpoch, isUtc: true)
       .toIso8601String();
+}
+
+/// Clones one queued event for the HTTP wire.
+///
+/// WHY: the Flutter channel/model key is `timestamp`, but Amplitude HTTP V2
+/// expects top-level `time`. The native Darwin path converts via `CodingKeys`;
+/// the pure-Dart path must do it exactly once at upload so session logic keeps
+/// using `timestamp` while the wire never contains it. A present `timestamp`
+/// is authoritative and replaces any hostile/raw `time`; without it an
+/// existing `time` is preserved. Nested `event_properties.timestamp` is left
+/// alone. The input map is never mutated.
+Map<String, dynamic> toDesktopWireEvent(Map<String, dynamic> event) {
+  final out = Map<String, dynamic>.from(event);
+  if (out.containsKey('timestamp')) {
+    final timestamp = out.remove('timestamp');
+    out['time'] = timestamp;
+  }
+  return out;
 }
 
 /// Deep-strips null-valued keys (maps) and null items (lists).

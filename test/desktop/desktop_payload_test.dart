@@ -33,6 +33,77 @@ void main() {
       );
       expect(payload['options'], {'min_id_length': 8});
     });
+
+    test('translates top-level timestamp to wire time', () {
+      final payload = buildDesktopPayload(
+        apiKey: 'key-1',
+        events: [
+          {'event_type': 'x', 'timestamp': 123},
+        ],
+        clientUploadTime: '2026-01-02T03:04:05.000Z',
+      );
+      final events = payload['events'] as List;
+      final event = events.single as Map;
+      expect(event['time'], 123);
+      expect(event.containsKey('timestamp'), isFalse);
+    });
+
+    test('leaves nested event_properties timestamp unchanged', () {
+      final payload = buildDesktopPayload(
+        apiKey: 'key-1',
+        events: [
+          {
+            'event_type': 'x',
+            'timestamp': 123,
+            'event_properties': {'timestamp': 'keep-me'},
+          },
+        ],
+        clientUploadTime: '2026-01-02T03:04:05.000Z',
+      );
+      final event = (payload['events'] as List).single as Map;
+      expect(event['time'], 123);
+      expect(event.containsKey('timestamp'), isFalse);
+      expect(
+        (event['event_properties'] as Map)['timestamp'],
+        'keep-me',
+      );
+    });
+
+    test('preserves existing time when timestamp is absent', () {
+      final payload = buildDesktopPayload(
+        apiKey: 'key-1',
+        events: [
+          {'event_type': 'x', 'time': 456},
+        ],
+        clientUploadTime: '2026-01-02T03:04:05.000Z',
+      );
+      final event = (payload['events'] as List).single as Map;
+      expect(event['time'], 456);
+      expect(event.containsKey('timestamp'), isFalse);
+    });
+
+    test('timestamp wins over hostile time without mutating input', () {
+      final input = {
+        'event_type': 'x',
+        'timestamp': 123,
+        'time': 999,
+      };
+      final events = [input];
+      final payload = buildDesktopPayload(
+        apiKey: 'key-1',
+        events: events,
+        clientUploadTime: '2026-01-02T03:04:05.000Z',
+      );
+      final event = (payload['events'] as List).single as Map;
+      expect(event['time'], 123);
+      expect(event.containsKey('timestamp'), isFalse);
+      // The caller-owned queue map must be unchanged.
+      expect(input, {
+        'event_type': 'x',
+        'timestamp': 123,
+        'time': 999,
+      });
+    });
   });
 
   group('formatDesktopUploadTime', () {
