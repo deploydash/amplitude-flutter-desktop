@@ -48,11 +48,12 @@ class DesktopIdentity {
     if (_userId != null) {
       await _storage.writeString(DesktopStoreKeys.userId, _userId!);
     }
-    _optOut =
-        (await _storage.readBool(DesktopStoreKeys.optOut)) ?? initialOptOut;
-    if (initialOptOut) {
-      await _storage.writeBool(DesktopStoreKeys.optOut, true);
-    }
+    // Current configuration owns opt-out (upstream parity): a newly supplied
+    // `true` must suppress tracking immediately and can never be defeated by
+    // an older stored `false`. The stored key is legacy migration only — it
+    // is deleted here so a future regression cannot read it.
+    _optOut = initialOptOut;
+    await _storage.deleteKey(DesktopStoreKeys.optOut);
     _loaded = true;
   }
 
@@ -82,12 +83,13 @@ class DesktopIdentity {
     }
   }
 
-  /// Persists the opt-out flag immediately. Mechanism only — who sets it is
-  /// host policy (plan §B.5).
+  /// Updates the in-memory opt-out policy only. Mechanism only — who sets
+  /// it is host policy (plan §B.5). Upstream parity: configuration owns the
+  /// value, so it is not persisted across launches; the host supplies its
+  /// consent-derived configuration on every startup.
   Future<void> setOptOut(bool optOut) async {
     _requireLoaded();
     _optOut = optOut;
-    await _storage.writeBool(DesktopStoreKeys.optOut, optOut);
   }
 
   /// Identity-only `reset()` (Swift `Amplitude.reset()` / Kotlin

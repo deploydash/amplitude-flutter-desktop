@@ -79,6 +79,11 @@ flow declines, call `await amplitude.setOptOut(true)`; while opted out,
 tracks are dropped and flush does nothing. Call `setOptOut(false)` when
 consent is granted.
 
+Opt-out is owned by the current configuration, not restored across launches:
+supply your consent-derived `optOut` on every `init`, and use `setOptOut`
+only to change the current run. Queued events are retained while opted out
+and drain if you opt back in during the same run.
+
 ### Desktop notes (Linux / Windows)
 
 - **Flush on close** (required): without it, events sit in the queue until

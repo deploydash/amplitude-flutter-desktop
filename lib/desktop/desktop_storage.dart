@@ -10,6 +10,9 @@ import 'desktop_constants.dart';
 class DesktopStoreKeys {
   static const deviceId = 'deviceId';
   static const userId = 'userId';
+  // Legacy migration only: opt-out is config-owned and never persisted in
+  // normal operation. `DesktopIdentity.load` deletes any value left by older
+  // builds so a regression cannot read it.
   static const optOut = 'optOut';
   static const lastEventId = 'lastEventId';
   static const sessionId = 'sessionId';

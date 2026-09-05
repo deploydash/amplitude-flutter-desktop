@@ -106,20 +106,67 @@ void main() {
       // Swift `Amplitude.reset()` / Kotlin `doResetWithDeviceId` parity:
       // queued events keep the previous identity and still drain.
       expect(await storage.listFilesOldestFirst(), hasLength(1));
-      // Opt-out is host policy, not analytics identity: reset keeps it.
+      // Opt-out is host policy, not analytics identity: reset keeps the
+      // in-memory value but never persists it.
       expect(identity.optOut, isTrue);
-      expect(await storage.readBool(DesktopStoreKeys.optOut), isTrue);
+      expect(await storage.readBool(DesktopStoreKeys.optOut), isNull);
     });
 
-    test('opt-out persists across loads', () async {
+    test('opt-out is config-owned, not restored across loads', () async {
       final identity = await load(initialOptOut: true);
       expect(identity.optOut, isTrue);
 
       final reloaded = await load();
-      expect(reloaded.optOut, isTrue);
+      expect(reloaded.optOut, isFalse,
+          reason: 'host must supply consent config on every startup');
 
-      await reloaded.setOptOut(false);
-      expect((await load()).optOut, isFalse);
+      await reloaded.setOptOut(true);
+      expect((await load()).optOut, isFalse,
+          reason: 'setOptOut is in-memory only');
+    });
+
+    test('current true dominates stored false and clears legacy key',
+        () async {
+      await storage.writeBool(DesktopStoreKeys.optOut, false);
+      final identity = await load(initialOptOut: true);
+      expect(identity.optOut, isTrue);
+      expect(await storage.readBool(DesktopStoreKeys.optOut), isNull);
+    });
+
+    test('current false dominates stored true and clears legacy key',
+        () async {
+      await storage.writeBool(DesktopStoreKeys.optOut, true);
+      final identity = await load(initialOptOut: false);
+      expect(identity.optOut, isFalse);
+      expect(await storage.readBool(DesktopStoreKeys.optOut), isNull);
+    });
+
+    test('initialization truth table owns opt-out, storage never wins',
+        () async {
+      final storedValues = <bool?>[null, false, true];
+      for (final stored in storedValues) {
+        for (final configured in [false, true]) {
+          storage = InMemoryDesktopStorage();
+          await storage.init();
+          if (stored != null) {
+            await storage.writeBool(DesktopStoreKeys.optOut, stored);
+          }
+          final identity = await load(initialOptOut: configured);
+          expect(identity.optOut, configured,
+              reason:
+                  'stored $stored with configured $configured must be $configured');
+          expect(await storage.readBool(DesktopStoreKeys.optOut), isNull,
+              reason: 'legacy key must be removed for stored $stored');
+        }
+      }
+    });
+
+    test('setOptOut does not persist across restart', () async {
+      final identity = await load(initialOptOut: false);
+      await identity.setOptOut(true);
+      expect(identity.optOut, isTrue);
+      final reloaded = await load(initialOptOut: false);
+      expect(reloaded.optOut, isFalse);
     });
   });
 }

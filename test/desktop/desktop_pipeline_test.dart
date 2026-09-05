@@ -618,6 +618,40 @@ void main() {
       expect(await storage.listFilesOldestFirst(), isEmpty);
     });
 
+    test('legacy stored false cannot defeat current true', () async {
+      await storage.init();
+      await storage.writeBool(DesktopStoreKeys.optOut, false);
+      final backend = await makeBackend(
+        config: {...configMap(), 'optOut': true},
+      );
+      await backend.track({'event_type': 'a'});
+      await backend.flush();
+
+      expect(requests, isEmpty);
+      expect(await storage.listFilesOldestFirst(), isEmpty);
+    });
+
+    test('opt-out keeps queued events for opt-in later in same run',
+        () async {
+      final backend = await makeBackend();
+      await backend.track({'event_type': 'a'});
+      await backend.setOptOut(true);
+      await backend.track({'event_type': 'b'});
+      await backend.flush();
+
+      expect(requests, isEmpty,
+          reason: 'opted-out flush must not upload');
+
+      await backend.setOptOut(false);
+      await backend.flush();
+
+      expect(uploadedEventTypes(), ['session_start', 'a'],
+          reason: 'pre-opt-out queue must survive and drain after opt-in');
+      await backend.track({'event_type': 'c'});
+      await backend.flush();
+      expect(uploadedEventTypes(), contains('c'));
+    });
+
     test('reset rotates identity but leaves queue and session to drain',
         () async {
       final backend = await makeBackend();
