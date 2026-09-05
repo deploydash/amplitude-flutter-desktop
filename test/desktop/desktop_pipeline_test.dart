@@ -531,7 +531,7 @@ void main() {
       expect(terminals.map((t) => '${t.eventType}:${t.code}'), ['b:413']);
     });
 
-    test('429 throttles uploads for 30 s without data loss', () async {
+    test('429 on a single file retries within the same flush', () async {
       // Historical 30 s throttle removed in T-7: 429 now uses the same
       // ordered whole-file retry as other retryable failures.
       final backend = await makeBackend();

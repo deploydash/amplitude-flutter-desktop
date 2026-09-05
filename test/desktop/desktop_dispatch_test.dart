@@ -122,9 +122,10 @@ void main() {
       expect((single as DispatchDropFile).code, 413);
     });
 
-    test('429 with quota bodies drops matches and throttles', () {
+    test('legacy camelCase 429 bodies retain the whole file for retry', () {
       // Historical camelCase parser removed in T-7: every 429 now retains
-      // the whole file for ordered retry.
+      // the whole file for ordered retry. The invented body stays as a
+      // contract fixture so camelCase parsing can never return.
       expect(
         decideDesktopDispatch(
           statusCode: 429,

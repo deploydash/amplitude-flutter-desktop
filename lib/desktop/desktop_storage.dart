@@ -29,12 +29,14 @@ class DesktopStoreKeys {
 // Injectable queue + identity store (plan §B.1).
 //
 // WHY this exact shape: it copies Aptabase's `StorageManager` seam
-// (init/get/add/delete, `shared_preferences` default, host-injectable
+// (init/get/add/delete, injectable queue location, host-injectable
 // override) extended with the file operations the Amplitude §A.5 dispatch
 // needs (split on 413, quarantine on corruption). The SDK owns the
 // lifecycle; the host owns the location by injecting an implementation.
-// Single-writer: all operations go through the backend's async mutex — no
-// isolates in v1.
+// Production Windows/Linux defaults to the crash-safe filesystem queue;
+// `SharedPreferencesDesktopStorage` stays as an explicitly-injected
+// compatibility implementation. Single-writer: all operations go through
+// the backend's async mutex — no isolates in v1.
 abstract class DesktopStorage {
   /// Prepares the store (loads caches, creates directories, ...).
   Future<void> init();

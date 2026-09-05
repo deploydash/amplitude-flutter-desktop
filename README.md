@@ -53,8 +53,9 @@ await amplitude.track(
 ```
 
 Events are written to the on-disk queue first and uploaded in batches, so
-a single event never triggers a request on its own — and nothing is lost
-if the app quits before the next upload.
+under the default 30-event threshold a single event never triggers a
+request on its own — and nothing is lost if the app quits before the next
+upload.
 
 ### 3. Identify users across login and logout
 
@@ -118,10 +119,11 @@ lifecycle signals flow automatically through the plugin, while hosts own
 flush on close; see Host responsibilities below.
 
 Unless noted below, behavior matches the Swift/Kotlin SDKs: upload
-batching and tuning, the 400/413/429 retry dispatch with silent offline
-trips and 30-day discard, session handling on the shared 5-minute gap,
-`$identify` batching, and `reset()` identity rotation are parity ports, not
-new features. Only these are actually desktop-specific:
+batching and tuning, the 400/413 retry dispatch and whole-file ordered 429
+retry with silent offline trips and 30-day discard, session handling on the
+shared 5-minute gap, `$identify` batching, and `reset()` identity rotation
+are parity ports, not new features. Only these are actually
+desktop-specific:
 
 - **Storage:** queue + identity live behind the injectable `DesktopStorage`
   seam. Production Windows/Linux defaults to a crash-safe filesystem queue
@@ -136,14 +138,13 @@ new features. Only these are actually desktop-specific:
   inject their own `DesktopStorage`; tests inject `InMemoryDesktopStorage`.
 - **`reset()` rotates identity, not network state:** clears the user id and
   rotates the device id, while deliberately keeping transport health
-  (offline/backoff/429 pause).
+  (offline/backoff/retry state).
 - **Lifecycle:** re-`init` disposes the replaced backend and hot restart
   retires the prior plugin's backends, so flush timers never double-upload.
   The backend shares one HTTP client, closed on dispose.
 - **Callbacks:** terminal outcomes (sent/dropped) fire the config-level
   `DesktopBackend.onTerminalEvent(event, code, message)`. Per-event
-  callbacks are not supported in v1 (`BaseEvent` has no callback field and
-  callbacks cannot cross a `MethodChannel`).
+  callbacks are not supported in v1 (`BaseEvent` has no callback field).
 - **Policy:** the SDK exposes mechanism only (`optOut`, `trackingOptions`,
   `flush()`). Consent, redaction, and storage location are host-app
   decisions. Mobile-only options (`migrateLegacyData`, location/ad-id
@@ -181,13 +182,22 @@ to provide them.)
   this as best-effort: kills and task-manager terminates deliver no
   notification, so the on-disk queue — not the close hook — is the delivery
   guarantee.
-- **Foreground signals are automatic through the channel API.** The desktop
-  plugin observes Flutter lifecycle states and forwards them to every
-  initialized backend: `resumed` enters foreground, `hidden`/`paused` exits,
-  `detached` flushes best-effort and stops, and `inactive` (alt-tab focus
-  loss) never ends a session. Direct `DesktopBackend` embedders still map
-  host observations onto the backend manually (timestamps are millis since
-  epoch):
+- **Context fields:** with IP tracking on and COPPA off, events carry
+  `ip: $remote` for server-side lookup unless the host set an explicit IP;
+  disabling IP tracking or enabling COPPA removes it. `device_model` is
+  omitted when no real hardware model exists — a Linux distribution name or
+  Windows edition is OS fact, not hardware, and is folded into `os_version`
+  instead.
+- **Foreground signals are automatic for public `Amplitude` users.** On
+  Linux/Windows the public API calls the in-process desktop backend
+  directly (the engine channel cannot deliver Dart-to-Dart calls, so there
+  is no channel round trip on desktop); the 14-method shape is unchanged.
+  The desktop plugin observes Flutter lifecycle states and forwards them to
+  every initialized backend: `resumed` enters foreground, `hidden`/`paused`
+  exits, `detached` flushes best-effort and stops, and `inactive` (alt-tab
+  focus loss) never ends a session. Direct `DesktopBackend` embedders still
+  map host observations onto the backend manually (timestamps are millis
+  since epoch):
 
   | Your app | Tell the backend |
   | --- | --- |
@@ -200,6 +210,18 @@ to provide them.)
   backgrounded — ending the session there is the classic desktop bug. See
   [`AppLifecycleListener`](https://api.flutter.dev/flutter/widgets/AppLifecycleListener-class.html)
   and [`AppLifecycleState`](https://api.flutter.dev/flutter/dart-ui/AppLifecycleState.html).
+
+## Assurance
+
+Desktop changes are held to an executable gate, not prose:
+`dart run tool/check_desktop_coverage.dart` runs the desktop suite with
+branch coverage and fails unless every instrumented line and branch is hit
+and every `lib/desktop/` file is measured (export-only files and the
+non-IO stub are the only exemptions). CI adds the lowest supported
+toolchain (Flutter 3.38.1) and current stable on Ubuntu plus Windows, Linux
+debug/release and Windows release example builds, and a public-`Amplitude`
+loopback integration test (timestamped wire contract, two-instance
+isolation, lifecycle rotation, restart drain) on both desktop devices.
 
 ## Need Help?
 
