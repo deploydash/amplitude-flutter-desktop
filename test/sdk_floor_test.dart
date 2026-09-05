@@ -54,8 +54,10 @@ void main() {
     });
 
     test('CHANGELOG states the raised Linux/Windows floor', () {
-      final unreleased =
-          changelog.substring(0, changelog.indexOf('## [4.7.1]'));
+      final unreleased = changelog.substring(
+        0,
+        changelog.indexOf('## [4.7.1]'),
+      );
       expect(unreleased, contains('3.38.1'));
     });
 

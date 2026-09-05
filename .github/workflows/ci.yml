@@ -26,3 +26,109 @@ jobs:
 
       - name: Test
         run: flutter test
+
+  # Desktop gates (T-12): enforced 100% desktop coverage plus real
+  # Linux/Windows builds and public-plugin integration. Additive: the
+  # upstream mobile/web `test` job above is untouched.
+  desktop:
+    name: Desktop ${{ matrix.flutter-version }} (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            flutter-version: '3.38.1'
+          - os: ubuntu-latest
+            flutter-version: stable
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@f43a0e5ff2bd294095638e18286ca9a3d1956744 # v3
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2
+        with:
+          channel: 'stable'
+          flutter-version: ${{ matrix.flutter-version }}
+
+      - name: Check Flutter version
+        run: flutter --version
+
+      - name: Install Linux desktop build dependencies
+        run: >
+          sudo apt-get update &&
+          sudo apt-get install -y clang cmake ninja-build pkg-config
+          libgtk-3-dev liblzma-dev xvfb
+
+      - name: Install packages
+        run: flutter pub get
+
+      - name: Linter
+        run: flutter analyze
+
+      - name: Unit tests
+        run: flutter test
+
+      - name: Desktop 100% line/branch coverage gate
+        run: dart run tool/check_desktop_coverage.dart
+
+      - name: Linux example debug build
+        run: cd example && flutter build linux --debug
+
+      - name: Linux example release build
+        run: cd example && flutter build linux --release
+
+      - name: Public-plugin integration on Linux
+        run: cd example && xvfb-run -a flutter test integration_test -d linux
+
+      - name: Upload coverage and logs
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: desktop-coverage-${{ matrix.flutter-version }}
+          path: |
+            coverage/desktop-lcov.info
+            coverage/desktop-test.log
+
+  windows:
+    name: Desktop stable (windows-latest)
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Checkout
+        uses: actions/checkout@f43a0e5ff2bd294095638e18286ca9a3d1956744 # v3
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2
+        with:
+          channel: 'stable'
+          flutter-version: '3.38.1'
+
+      - name: Check Flutter version
+        run: flutter --version
+
+      - name: Install packages
+        run: flutter pub get
+
+      - name: Linter
+        run: flutter analyze
+
+      - name: Desktop tests with 100% line/branch coverage gate
+        run: dart run tool/check_desktop_coverage.dart
+
+      - name: Windows example release build
+        run: cd example && flutter build windows --release
+
+      - name: Public-plugin integration on Windows
+        run: cd example && flutter test integration_test -d windows
+
+      - name: Upload coverage and logs
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: desktop-coverage-windows
+          path: |
+            coverage/desktop-lcov.info
+            coverage/desktop-test.log

@@ -54,7 +54,7 @@ class WidgetsBindingLifecycleSource
     with WidgetsBindingObserver
     implements DesktopLifecycleSource {
   WidgetsBindingLifecycleSource({int Function()? clock})
-      : _clock = clock ?? _wallClock;
+    : _clock = clock ?? _wallClock;
 
   static int _wallClock() => DateTime.now().millisecondsSinceEpoch;
 
@@ -87,16 +87,8 @@ class DesktopAmplitudePlugin {
   DesktopAmplitudePlugin({
     DesktopBackendFactory? backendFactory,
     DesktopLifecycleSource? lifecycleSource,
-  })  : _backendFactory = backendFactory ?? DesktopBackend.new,
-        _lifecycleSource = lifecycleSource {
-    final source = _lifecycleSource;
-    if (source != null) {
-      _isForeground = _isForegroundState(source.currentState);
-      source.start((state, timestampMs) {
-        unawaited(handleLifecycleForTests(state, timestampMs));
-      });
-    }
-  }
+  }) : _backendFactory = backendFactory ?? DesktopBackend.new,
+       _lifecycleSource = lifecycleSource;
 
   final DesktopBackendFactory _backendFactory;
   final DesktopLifecycleSource? _lifecycleSource;
@@ -107,13 +99,40 @@ class DesktopAmplitudePlugin {
   /// Set on `detached`: further states are ignored and observations stop.
   bool _detached = false;
 
+  /// Whether the lifecycle source was attached. Deferred to the first
+  /// `init` call: the generated registrant runs before the binding exists,
+  /// so the constructor must never touch it.
+  bool _lifecycleAttached = false;
+
+  /// Attaches lifecycle observations exactly once. Total: when the binding
+  /// is not ready the plugin assumes foreground and serves method calls
+  /// without observations rather than throwing during startup.
+  void _ensureLifecycleAttached() {
+    if (_lifecycleAttached || _lifecycleSource == null || _detached) {
+      return;
+    }
+    _lifecycleAttached = true;
+    final source = _lifecycleSource;
+    try {
+      _isForeground = _isForegroundState(source.currentState);
+    } catch (_) {
+      _isForeground = true;
+    }
+    try {
+      source.start((state, timestampMs) {
+        unawaited(handleLifecycleForTests(state, timestampMs));
+      });
+    } catch (_) {
+      // Observations unavailable; direct calls still work.
+    }
+  }
+
   static bool _isForegroundState(AppLifecycleState state) {
     return switch (state) {
       AppLifecycleState.resumed || AppLifecycleState.inactive => true,
       AppLifecycleState.hidden ||
       AppLifecycleState.paused ||
-      AppLifecycleState.detached =>
-        false,
+      AppLifecycleState.detached => false,
     };
   }
 
@@ -148,8 +167,9 @@ class DesktopAmplitudePlugin {
       lifecycleSource: WidgetsBindingLifecycleSource(),
     );
     _activePlugin = next;
-    const MethodChannel('amplitude_flutter')
-        .setMethodCallHandler(next.handleMethodCall);
+    const MethodChannel(
+      'amplitude_flutter',
+    ).setMethodCallHandler(next.handleMethodCall);
     if (previous != null) {
       unawaited(previous.dispose());
     }
@@ -216,6 +236,7 @@ class DesktopAmplitudePlugin {
   /// Handles method calls over the `MethodChannel` of this plugin.
   Future<dynamic> handleMethodCall(MethodCall call) async {
     if (call.method == 'init') {
+      _ensureLifecycleAttached();
       final args = Map<String, dynamic>.from(call.arguments as Map);
       final backend = _backendFactory();
       final ok = await backend.init(args);
@@ -245,8 +266,10 @@ class DesktopAmplitudePlugin {
     }
 
     final rawLookup = (call.arguments as Map)['instanceName'];
-    final backend = instances[
-        rawLookup is String ? rawLookup : Constants.defaultInstanceName];
+    final backend =
+        instances[rawLookup is String
+            ? rawLookup
+            : Constants.defaultInstanceName];
     if (backend == null) {
       // No init yet for this instance: reads resolve null/-1 and never hang
       // (the Android `isBuilt` gate analog); writes drop silently.
@@ -319,8 +342,6 @@ class DesktopAmplitudePlugin {
   }
 
   Map<String, dynamic> _eventArgs(MethodCall call) {
-    return Map<String, dynamic>.from(
-      (call.arguments as Map)['event'] as Map,
-    );
+    return Map<String, dynamic>.from((call.arguments as Map)['event'] as Map);
   }
 }

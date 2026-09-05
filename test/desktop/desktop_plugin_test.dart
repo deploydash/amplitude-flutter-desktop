@@ -90,6 +90,21 @@ class FakeLifecycleSource implements DesktopLifecycleSource {
   }
 }
 
+/// Lifecycle source whose observation fails: proves the plugin still
+/// serves method calls when the binding is not ready at attach time.
+class ThrowingLifecycleSource implements DesktopLifecycleSource {
+  @override
+  AppLifecycleState get currentState => throw StateError('no binding');
+
+  @override
+  void start(void Function(AppLifecycleState state, int timestampMs) onState) {
+    throw StateError('no binding');
+  }
+
+  @override
+  void stop() {}
+}
+
 Map<String, dynamic> initArgs({String instance = 'test'}) {
   return Map<String, dynamic>.from(
     Configuration(apiKey: 'test-key', instanceName: instance).toMap(),
@@ -127,65 +142,69 @@ void main() {
   });
 
   group('DesktopAmplitudePlugin channel wiring', () {
-    test(r'init stores the backend; track/flush delivers with api_key',
-        () async {
-      await call(harness.plugin, 'init', initArgs());
-      await call(harness.plugin, 'track', {
-        'instanceName': 'test',
-        'event': {'event_type': 'clicked'},
-      });
-      await call(harness.plugin, 'flush', {'instanceName': 'test'});
+    test(
+      r'init stores the backend; track/flush delivers with api_key',
+      () async {
+        await call(harness.plugin, 'init', initArgs());
+        await call(harness.plugin, 'track', {
+          'instanceName': 'test',
+          'event': {'event_type': 'clicked'},
+        });
+        await call(harness.plugin, 'flush', {'instanceName': 'test'});
 
-      expect(harness.requests, hasLength(1));
-      final payload = decodeUpload(harness.requests.single);
-      expect(payload['api_key'], 'test-key');
-      expect(
-        (payload['events'] as List).map((e) => (e as Map)['event_type']),
-        contains('clicked'),
-      );
-    });
+        expect(harness.requests, hasLength(1));
+        final payload = decodeUpload(harness.requests.single);
+        expect(payload['api_key'], 'test-key');
+        expect(
+          (payload['events'] as List).map((e) => (e as Map)['event_type']),
+          contains('clicked'),
+        );
+      },
+    );
 
-    test('identify/groupIdentify/setGroup/revenue enqueue without throwing',
-        () async {
-      await call(harness.plugin, 'init', initArgs());
-      await call(harness.plugin, 'identify', {
-        'instanceName': 'test',
-        'event': {
-          'event_type': r'$identify',
-          'user_properties': {
-            r'$set': {'plan': 'pro'}
+    test(
+      'identify/groupIdentify/setGroup/revenue enqueue without throwing',
+      () async {
+        await call(harness.plugin, 'init', initArgs());
+        await call(harness.plugin, 'identify', {
+          'instanceName': 'test',
+          'event': {
+            'event_type': r'$identify',
+            'user_properties': {
+              r'$set': {'plan': 'pro'},
+            },
           },
-        },
-      });
-      await call(harness.plugin, 'groupIdentify', {
-        'instanceName': 'test',
-        'event': {
-          'event_type': r'$groupidentify',
-          'groups': {'org': 'acme'},
-        },
-      });
-      await call(harness.plugin, 'setGroup', {
-        'instanceName': 'test',
-        'event': {
-          'event_type': r'$identify',
-          'groups': {'org': 'acme'},
-        },
-      });
-      await call(harness.plugin, 'revenue', {
-        'instanceName': 'test',
-        'event': {'event_type': 'revenue_amount', 'price': 3.99},
-      });
-      await call(harness.plugin, 'flush', {'instanceName': 'test'});
+        });
+        await call(harness.plugin, 'groupIdentify', {
+          'instanceName': 'test',
+          'event': {
+            'event_type': r'$groupidentify',
+            'groups': {'org': 'acme'},
+          },
+        });
+        await call(harness.plugin, 'setGroup', {
+          'instanceName': 'test',
+          'event': {
+            'event_type': r'$identify',
+            'groups': {'org': 'acme'},
+          },
+        });
+        await call(harness.plugin, 'revenue', {
+          'instanceName': 'test',
+          'event': {'event_type': 'revenue_amount', 'price': 3.99},
+        });
+        await call(harness.plugin, 'flush', {'instanceName': 'test'});
 
-      expect(harness.requests, hasLength(1));
-      final types = [
-        for (final event
-            in (decodeUpload(harness.requests.single)['events'] as List))
-          (event as Map)['event_type'],
-      ];
-      expect(types, contains(r'$groupidentify'));
-      expect(types, contains('revenue_amount'));
-    });
+        expect(harness.requests, hasLength(1));
+        final types = [
+          for (final event
+              in (decodeUpload(harness.requests.single)['events'] as List))
+            (event as Map)['event_type'],
+        ];
+        expect(types, contains(r'$groupidentify'));
+        expect(types, contains('revenue_amount'));
+      },
+    );
 
     test('identity reads round-trip through the channel', () async {
       await call(harness.plugin, 'init', initArgs());
@@ -216,11 +235,9 @@ void main() {
         'instanceName': 'test',
         'event': {'event_type': 'clicked'},
       });
-      final sessionId = await call(
-        harness.plugin,
-        'getSessionId',
-        {'instanceName': 'test'},
-      );
+      final sessionId = await call(harness.plugin, 'getSessionId', {
+        'instanceName': 'test',
+      });
       expect(sessionId, isA<int>());
       expect(sessionId, greaterThanOrEqualTo(0));
     });
@@ -241,11 +258,13 @@ void main() {
 
     test('reset rotates the device id', () async {
       await call(harness.plugin, 'init', initArgs());
-      final before =
-          await call(harness.plugin, 'getDeviceId', {'instanceName': 'test'});
+      final before = await call(harness.plugin, 'getDeviceId', {
+        'instanceName': 'test',
+      });
       await call(harness.plugin, 'reset', {'instanceName': 'test'});
-      final after =
-          await call(harness.plugin, 'getDeviceId', {'instanceName': 'test'});
+      final after = await call(harness.plugin, 'getDeviceId', {
+        'instanceName': 'test',
+      });
       expect(before, isNotNull);
       expect(after, isNot(before));
       expect(
@@ -254,32 +273,38 @@ void main() {
       );
     });
 
-    test('reads before init resolve null/-1 and writes drop, never hanging',
-        () async {
-      expect(
-        await call(harness.plugin, 'getUserId', {'instanceName': 'missing'})
-            .timeout(const Duration(seconds: 5)),
-        isNull,
-      );
-      expect(
-        await call(harness.plugin, 'getDeviceId', {'instanceName': 'missing'})
-            .timeout(const Duration(seconds: 5)),
-        isNull,
-      );
-      expect(
-        await call(harness.plugin, 'getSessionId', {'instanceName': 'missing'})
-            .timeout(const Duration(seconds: 5)),
-        -1,
-      );
-      await call(harness.plugin, 'track', {
-        'instanceName': 'missing',
-        'event': {'event_type': 'clicked'},
-      }).timeout(const Duration(seconds: 5));
-      await call(harness.plugin, 'flush', {'instanceName': 'missing'})
-          .timeout(const Duration(seconds: 5));
-      expect(harness.requests, isEmpty);
-      expect(harness.backends, isEmpty);
-    });
+    test(
+      'reads before init resolve null/-1 and writes drop, never hanging',
+      () async {
+        expect(
+          await call(harness.plugin, 'getUserId', {
+            'instanceName': 'missing',
+          }).timeout(const Duration(seconds: 5)),
+          isNull,
+        );
+        expect(
+          await call(harness.plugin, 'getDeviceId', {
+            'instanceName': 'missing',
+          }).timeout(const Duration(seconds: 5)),
+          isNull,
+        );
+        expect(
+          await call(harness.plugin, 'getSessionId', {
+            'instanceName': 'missing',
+          }).timeout(const Duration(seconds: 5)),
+          -1,
+        );
+        await call(harness.plugin, 'track', {
+          'instanceName': 'missing',
+          'event': {'event_type': 'clicked'},
+        }).timeout(const Duration(seconds: 5));
+        await call(harness.plugin, 'flush', {
+          'instanceName': 'missing',
+        }).timeout(const Duration(seconds: 5));
+        expect(harness.requests, isEmpty);
+        expect(harness.backends, isEmpty);
+      },
+    );
 
     test('instances are namespaced by instanceName', () async {
       await call(harness.plugin, 'init', initArgs(instance: 'a'));
@@ -394,7 +419,9 @@ void main() {
       final messenger =
           TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
       messenger.setMockMethodCallHandler(
-          channel, harness.plugin.handleMethodCall);
+        channel,
+        harness.plugin.handleMethodCall,
+      );
       try {
         await channel.invokeMethod('init', initArgs(instance: 'wired'));
         await channel.invokeMethod('track', {
@@ -402,8 +429,9 @@ void main() {
           'event': {'event_type': 'clicked'},
         });
         await channel.invokeMethod('flush', {'instanceName': 'wired'});
-        final deviceId = await channel
-            .invokeMethod<String?>('getDeviceId', {'instanceName': 'wired'});
+        final deviceId = await channel.invokeMethod<String?>('getDeviceId', {
+          'instanceName': 'wired',
+        });
         expect(deviceId, isNotNull);
         expect(harness.requests, hasLength(1));
       } finally {
@@ -447,8 +475,9 @@ void main() {
           'instanceName': 'test',
           'event': {'event_type': 'a'},
         });
-        final first =
-            await call(plugin, 'getSessionId', {'instanceName': 'test'});
+        final first = await call(plugin, 'getSessionId', {
+          'instanceName': 'test',
+        });
 
         await plugin.handleLifecycleForTests(AppLifecycleState.hidden, 2000);
         await plugin.handleLifecycleForTests(AppLifecycleState.resumed, 9000);
@@ -457,8 +486,10 @@ void main() {
         expect(harness.requests, isEmpty);
         expect(requests, isNotEmpty);
         // Default 5-minute gap: 2 s to 9 s is within gap, session extends.
-        expect(await call(plugin, 'getSessionId', {'instanceName': 'test'}),
-            first);
+        expect(
+          await call(plugin, 'getSessionId', {'instanceName': 'test'}),
+          first,
+        );
       } finally {
         await plugin.dispose();
       }
@@ -475,8 +506,9 @@ void main() {
           'instanceName': 'test',
           'event': {'event_type': 'a'},
         });
-        final first =
-            await call(plugin, 'getSessionId', {'instanceName': 'test'});
+        final first = await call(plugin, 'getSessionId', {
+          'instanceName': 'test',
+        });
 
         await plugin.handleLifecycleForTests(AppLifecycleState.hidden, 1000);
         await plugin.handleLifecycleForTests(AppLifecycleState.paused, 1100);
@@ -486,8 +518,10 @@ void main() {
 
         // Within gap, no rotation despite duplicate exits/enters; inactive
         // is not a boundary.
-        expect(await call(plugin, 'getSessionId', {'instanceName': 'test'}),
-            first);
+        expect(
+          await call(plugin, 'getSessionId', {'instanceName': 'test'}),
+          first,
+        );
       } finally {
         await plugin.dispose();
       }
@@ -509,48 +543,55 @@ void main() {
       }
     });
 
-    test('init while hidden starts background; resume rotates past gap',
-        () async {
-      final requests = <http.BaseRequest>[];
-      final backends = <DesktopBackend>[];
-      final source =
-          FakeLifecycleSource(AppLifecycleState.hidden);
-      final plugin = makeLifecyclePlugin(source, requests, backends);
-      try {
-        await call(plugin, 'init', initArgs());
-        await call(plugin, 'track', {
-          'instanceName': 'test',
-          'event': {'event_type': 'a'},
-        });
-        final first =
-            await call(plugin, 'getSessionId', {'instanceName': 'test'});
+    test(
+      'init while hidden starts background; resume rotates past gap',
+      () async {
+        final requests = <http.BaseRequest>[];
+        final backends = <DesktopBackend>[];
+        final source = FakeLifecycleSource(AppLifecycleState.hidden);
+        final plugin = makeLifecyclePlugin(source, requests, backends);
+        try {
+          await call(plugin, 'init', initArgs());
+          await call(plugin, 'track', {
+            'instanceName': 'test',
+            'event': {'event_type': 'a'},
+          });
+          final first = await call(plugin, 'getSessionId', {
+            'instanceName': 'test',
+          });
 
-        // 10 minutes later (past the 5-minute gap): resume rotates.
-        final resumeMs =
-            DateTime.now().millisecondsSinceEpoch + 10 * 60 * 1000;
-        await plugin.handleLifecycleForTests(
-            AppLifecycleState.resumed, resumeMs);
-        await call(plugin, 'track', {
-          'instanceName': 'test',
-          'event': {'event_type': 'b'},
-        });
-        expect(await call(plugin, 'getSessionId', {'instanceName': 'test'}),
-            isNot(first));
+          // 10 minutes later (past the 5-minute gap): resume rotates.
+          final resumeMs =
+              DateTime.now().millisecondsSinceEpoch + 10 * 60 * 1000;
+          await plugin.handleLifecycleForTests(
+            AppLifecycleState.resumed,
+            resumeMs,
+          );
+          await call(plugin, 'track', {
+            'instanceName': 'test',
+            'event': {'event_type': 'b'},
+          });
+          expect(
+            await call(plugin, 'getSessionId', {'instanceName': 'test'}),
+            isNot(first),
+          );
 
-        await call(plugin, 'flush', {'instanceName': 'test'});
-        final types = [
-          for (final r in requests)
-            for (final e
-                in (decodeUpload(r)['events'] as List))
-              (e as Map)['event_type'] as String,
-        ];
-        expect(types, contains('session_end'));
-        expect(types.lastIndexOf('session_start'),
-            greaterThan(types.indexOf('session_end')));
-      } finally {
-        await plugin.dispose();
-      }
-    });
+          await call(plugin, 'flush', {'instanceName': 'test'});
+          final types = [
+            for (final r in requests)
+              for (final e in (decodeUpload(r)['events'] as List))
+                (e as Map)['event_type'] as String,
+          ];
+          expect(types, contains('session_end'));
+          expect(
+            types.lastIndexOf('session_start'),
+            greaterThan(types.indexOf('session_end')),
+          );
+        } finally {
+          await plugin.dispose();
+        }
+      },
+    );
 
     test('dispose is idempotent and stops observations', () async {
       final requests = <http.BaseRequest>[];
@@ -565,8 +606,11 @@ void main() {
       final before = requests.length;
       source.fire(AppLifecycleState.hidden, 9999);
       await Future<void>.delayed(Duration.zero);
-      expect(requests.length, before,
-          reason: 'disposed plugin forwards nothing');
+      expect(
+        requests.length,
+        before,
+        reason: 'disposed plugin forwards nothing',
+      );
     });
 
     test('hot restart retires the old observer with its backends', () async {
@@ -601,8 +645,11 @@ void main() {
 
         await plugin.handleLifecycleForTests(AppLifecycleState.resumed, 6000);
         await Future<void>.delayed(Duration.zero);
-        expect(requests.length, afterDetach,
-            reason: 'states after detached are ignored');
+        expect(
+          requests.length,
+          afterDetach,
+          reason: 'states after detached are ignored',
+        );
         expect(source.stops, greaterThanOrEqualTo(1));
       } finally {
         await plugin.dispose();
@@ -624,8 +671,10 @@ void main() {
         await Future<void>.delayed(Duration.zero);
         source.fire(AppLifecycleState.resumed, 2000);
         await Future<void>.delayed(Duration.zero);
-        expect(await call(plugin, 'getSessionId', {'instanceName': 'test'}),
-            isNot(-1));
+        expect(
+          await call(plugin, 'getSessionId', {'instanceName': 'test'}),
+          isNot(-1),
+        );
       } finally {
         await plugin.dispose();
       }
@@ -643,18 +692,69 @@ void main() {
           'instanceName': 'test',
           'event': {'event_type': 'a'},
         });
-        expect(await call(plugin, 'getSessionId', {'instanceName': 'test'}),
-            isNot(-1));
+        expect(
+          await call(plugin, 'getSessionId', {'instanceName': 'test'}),
+          isNot(-1),
+        );
       } finally {
         await plugin.dispose();
       }
     });
 
     test('detached initial state starts background', () async {
+      final requests = <http.BaseRequest>[];
+      final backends = <DesktopBackend>[];
       final source = FakeLifecycleSource(AppLifecycleState.detached);
-      final plugin = DesktopAmplitudePlugin(lifecycleSource: source);
-      await plugin.dispose();
+      final plugin = makeLifecyclePlugin(source, requests, backends);
+      try {
+        await call(plugin, 'init', initArgs());
+        await call(plugin, 'track', {
+          'instanceName': 'test',
+          'event': {'event_type': 'a'},
+        });
+        expect(
+          await call(plugin, 'getSessionId', {'instanceName': 'test'}),
+          isNot(-1),
+        );
+      } finally {
+        await plugin.dispose();
+      }
       expect(source.stops, greaterThanOrEqualTo(1));
+    });
+
+    test('an unobservable lifecycle still serves method calls', () async {
+      final requests = <http.BaseRequest>[];
+      final backends = <DesktopBackend>[];
+      final plugin = DesktopAmplitudePlugin(
+        backendFactory: () {
+          final backend = DesktopBackend(
+            storage: InMemoryDesktopStorage(),
+            transport: DesktopTransport(
+              client: MockClient((request) async {
+                requests.add(request);
+                return http.Response('{}', 200);
+              }),
+            ),
+          );
+          backends.add(backend);
+          return backend;
+        },
+        lifecycleSource: ThrowingLifecycleSource(),
+      );
+      try {
+        await call(plugin, 'init', initArgs());
+        await call(plugin, 'track', {
+          'instanceName': 'test',
+          'event': {'event_type': 'a'},
+        });
+        await call(plugin, 'flush', {'instanceName': 'test'});
+        expect(requests, hasLength(1));
+      } finally {
+        await plugin.dispose();
+        for (final backend in backends) {
+          await backend.dispose();
+        }
+      }
     });
 
     test('detached without a source still exits backends', () async {
@@ -682,11 +782,11 @@ void main() {
       TestWidgetsFlutterBinding.ensureInitialized();
       final previousFactory = DesktopAmplitudePlugin.debugBackendFactory;
       DesktopAmplitudePlugin.debugBackendFactory = () => DesktopBackend(
-            storage: InMemoryDesktopStorage(),
-            transport: DesktopTransport(
-              client: MockClient((request) async => http.Response('{}', 200)),
-            ),
-          );
+        storage: InMemoryDesktopStorage(),
+        transport: DesktopTransport(
+          client: MockClient((request) async => http.Response('{}', 200)),
+        ),
+      );
       try {
         DesktopAmplitudePlugin.registerWith();
         final active = DesktopAmplitudePlugin.activePluginForTests!;
@@ -699,14 +799,15 @@ void main() {
   });
 
   group('WidgetsBindingLifecycleSource', () {
-    test('reports binding state, forwards with clock, stops cleanly',
-        () async {
+    test('reports binding state, forwards with clock, stops cleanly', () async {
       TestWidgetsFlutterBinding.ensureInitialized();
       var clockCalls = 0;
-      final source = WidgetsBindingLifecycleSource(clock: () {
-        clockCalls += 1;
-        return 4242;
-      });
+      final source = WidgetsBindingLifecycleSource(
+        clock: () {
+          clockCalls += 1;
+          return 4242;
+        },
+      );
       expect(source.currentState, isA<AppLifecycleState>());
 
       AppLifecycleState? seen;
