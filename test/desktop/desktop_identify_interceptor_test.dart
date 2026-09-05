@@ -118,8 +118,8 @@ void main() {
       }, userId: 'u'));
       expect(result.event, isNull);
       expect(result.transfers, isEmpty);
-      expect(timers.length, 2, reason: 'each hold restarts the timer');
-      expect(timers.first.isActive, isFalse);
+      expect(timers.length, 1, reason: 'fixed window keeps the first timer');
+      expect(timers.first.isActive, isTrue);
 
       final combined = await interceptor.transfer();
       expect(combined, {
@@ -131,6 +131,75 @@ void main() {
         'timestamp': 999,
       });
       expect(await interceptor.transfer(), isNull);
+    });
+
+    test('second hold keeps the first batch timer', () async {
+      final interceptor = makeInterceptor();
+      await interceptor.process(identifyEvent({
+        r'$set': {'a': 1}
+      }));
+      await interceptor.process(identifyEvent({
+        r'$set': {'b': 2}
+      }));
+
+      expect(timers, hasLength(1));
+      expect(timers.first.isActive, isTrue);
+    });
+
+    test('firing the first timer transfers the merged batch', () async {
+      final interceptor = makeInterceptor();
+      await interceptor.process(identifyEvent({
+        r'$set': {'a': 1}
+      }));
+      await interceptor.process(identifyEvent({
+        r'$set': {'b': 2}
+      }));
+
+      timers.single.fire();
+      expect(timerFires, 1);
+      final combined = await interceptor.transfer();
+      expect((combined!['user_properties'] as Map)[r'$set'], {'a': 1, 'b': 2});
+    });
+
+    test('continuous identifies do not move the deadline', () async {
+      final interceptor = makeInterceptor();
+      for (var i = 0; i < 5; i++) {
+        await interceptor.process(identifyEvent({
+          r'$set': {'k$i': i}
+        }));
+      }
+      expect(timers, hasLength(1));
+      expect(timers.first.isActive, isTrue);
+    });
+
+    test('next batch after transfer starts a new timer', () async {
+      final interceptor = makeInterceptor();
+      await interceptor.process(identifyEvent({
+        r'$set': {'a': 1}
+      }));
+      expect(timers, hasLength(1));
+      await interceptor.transfer();
+      await interceptor.process(identifyEvent({
+        r'$set': {'b': 2}
+      }));
+      expect(timers, hasLength(2));
+      expect(timers.last.isActive, isTrue);
+    });
+
+    test('hold after timer expiry starts a fresh timer', () async {
+      final interceptor = makeInterceptor();
+      await interceptor.process(identifyEvent({
+        r'$set': {'a': 1}
+      }));
+      expect(timers, hasLength(1));
+      timers.single.fire();
+      expect(timers.single.isActive, isFalse);
+
+      await interceptor.process(identifyEvent({
+        r'$set': {'b': 2}
+      }));
+      expect(timers, hasLength(2));
+      expect(timers.last.isActive, isTrue);
     });
 
     test('source wins except null keeps old', () async {
@@ -269,6 +338,24 @@ void main() {
       final combined = await interceptor.transfer();
       expect((combined!['user_properties'] as Map)[r'$set'], {'a': 1});
       expect(combined['device_id'], 'd1');
+    });
+
+    test('restore schedules exactly one timer without duplication', () async {
+      var interceptor = makeInterceptor();
+      await interceptor.process(identifyEvent({
+        r'$set': {'a': 1}
+      }));
+      expect(timers, hasLength(1));
+
+      interceptor = makeInterceptor();
+      await interceptor.restore();
+      expect(timers, hasLength(2),
+          reason: 'restored hold must schedule a batch timer');
+      expect(timers.last.isActive, isTrue);
+
+      await interceptor.restore();
+      expect(timers, hasLength(2),
+          reason: 'second restore must not duplicate the active timer');
     });
 
     test('corrupt persisted hold restores to empty, never throws', () async {

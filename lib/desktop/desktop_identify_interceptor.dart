@@ -116,6 +116,9 @@ class DesktopIdentifyInterceptor {
           await _storage.readString(DesktopStoreKeys.heldIdentifyUserId);
       _heldDeviceId =
           await _storage.readString(DesktopStoreKeys.heldIdentifyDeviceId);
+      // A restored hold still needs its fixed-window deadline: schedule
+      // exactly one timer, never duplicating an already-active one.
+      _ensureTimer();
     } catch (_) {
       await _clearHeld();
     }
@@ -157,10 +160,11 @@ class DesktopIdentifyInterceptor {
         await _clearHeld();
         return DesktopInterceptResult(transfers: transfers, event: event);
       }
-      // Interceptible `$identify` is held; the one-shot timer (re)starts.
+      // Interceptible `$identify` is held; the fixed batch window starts with
+      // the first hold and later holds keep that same deadline.
       if (isInterceptibleDesktopIdentify(event)) {
         await _hold(event);
-        _restartTimer();
+        _ensureTimer();
         return DesktopInterceptResult(transfers: transfers);
       }
       // Any other `$identify` (e.g. with `$add`) flushes the hold first.
@@ -273,8 +277,17 @@ class DesktopIdentifyInterceptor {
     await _storage.deleteKey(DesktopStoreKeys.heldIdentifyDeviceId);
   }
 
-  void _restartTimer() {
-    _timer?.cancel();
+  /// Starts the batch timer only when none is active.
+  ///
+  /// WHY: the window is fixed from the first held identify (Swift schedules
+  /// the one-shot only when no timer exists). Restarting on every hold would
+  /// let a continuous stream postpone delivery indefinitely.
+  void _ensureTimer() {
+    final current = _timer;
+    if (current != null && current.isActive) {
+      return;
+    }
+    current?.cancel();
     _timer = _timerFactory(_interval, _onTimerFired);
   }
 
