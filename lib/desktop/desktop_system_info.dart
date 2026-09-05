@@ -141,10 +141,10 @@ class PackageInfoDesktopAppInfo implements DesktopAppInfoSource {
 ///
 /// WHY a function and not inline: enrichment stays a pure function of its
 /// arguments (testable), while this platform lookup lives at the call site.
+///
+/// No try/catch: `PlatformDispatcher.locale` always yields a locale in
+/// practice (never throws), so a fallback arm would be uncoverable dead
+/// code. Callers needing a default handle absence themselves.
 String desktopLocaleTag() {
-  try {
-    return PlatformDispatcher.instance.locale.toLanguageTag();
-  } catch (_) {
-    return 'en';
-  }
+  return PlatformDispatcher.instance.locale.toLanguageTag();
 }

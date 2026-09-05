@@ -11,6 +11,22 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
 
+// Transport that records close(): proves hot-restart retires the previous
+// plugin's backends (their timers/clients must not survive re-registration).
+class RecordingCloseTransport extends DesktopTransport {
+  RecordingCloseTransport({required super.client, required this.onClose});
+
+  final void Function() onClose;
+  bool closed = false;
+
+  @override
+  void close() {
+    closed = true;
+    onClose();
+    super.close();
+  }
+}
+
 // Channel wiring for the pure-Dart desktop backend (plan §H.8).
 //
 // WHY this test drives the handler directly: the plugin is a static
@@ -287,6 +303,56 @@ void main() {
         () => call(harness.plugin, 'teleport', {'instanceName': 'test'}),
         throwsA(isA<PlatformException>()),
       );
+    });
+
+    test('unknown methods throw Unimplemented before init too', () async {
+      expect(
+        () => call(harness.plugin, 'teleport', {'instanceName': 'missing'}),
+        throwsA(isA<PlatformException>()),
+      );
+    });
+
+    test('hot restart disposes the previous plugin backends', () async {
+      TestWidgetsFlutterBinding.ensureInitialized();
+      final closed = <RecordingCloseTransport>[];
+      final created = <DesktopBackend>[];
+      final previousFactory = DesktopAmplitudePlugin.debugBackendFactory;
+      DesktopAmplitudePlugin.debugBackendFactory = () {
+        final transport = RecordingCloseTransport(
+          client: MockClient((request) async => http.Response('{}', 200)),
+          onClose: () {},
+        );
+        closed.add(transport);
+        final backend = DesktopBackend(
+          storage: InMemoryDesktopStorage(),
+          transport: transport,
+        );
+        created.add(backend);
+        return backend;
+      };
+      const channel = MethodChannel('amplitude_flutter');
+      final messenger =
+          TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
+      try {
+        DesktopAmplitudePlugin.registerWith();
+        final first = DesktopAmplitudePlugin.activePluginForTests!;
+        await first.handleMethodCall(MethodCall('init', initArgs()));
+        expect(created, hasLength(1));
+
+        // Hot restart re-runs the registrant: the first plugin's backends
+        // must be retired so their flush timers cannot double-upload.
+        DesktopAmplitudePlugin.registerWith();
+        await Future<void>.delayed(Duration.zero);
+        expect(closed, hasLength(1));
+        expect(closed.single.closed, isTrue);
+        expect(first.instances, isEmpty);
+        for (final backend in created) {
+          await backend.dispose();
+        }
+      } finally {
+        DesktopAmplitudePlugin.debugBackendFactory = previousFactory;
+        messenger.setMockMethodCallHandler(channel, null);
+      }
     });
 
     test('registerWith wires the channel end to end', () async {

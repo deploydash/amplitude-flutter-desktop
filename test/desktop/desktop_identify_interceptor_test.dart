@@ -270,5 +270,76 @@ void main() {
       expect((combined!['user_properties'] as Map)[r'$set'], {'a': 1});
       expect(combined['device_id'], 'd1');
     });
+
+    test('corrupt persisted hold restores to empty, never throws', () async {
+      await storage.writeString(DesktopStoreKeys.heldIdentify, 'not-json{{{');
+      var interceptor = makeInterceptor();
+      await interceptor.restore();
+      expect(await interceptor.transfer(), isNull);
+      expect(await storage.readString(DesktopStoreKeys.heldIdentify), isNull,
+          reason: 'the corrupt hold must be cleared, not left to rot');
+
+      await storage.writeString(DesktopStoreKeys.heldIdentify, '{"\$set": 42}');
+      interceptor = makeInterceptor();
+      await interceptor.restore();
+      expect(await interceptor.transfer(), isNull,
+          reason: r'a $set that is not a Map cannot be held');
+      expect(await storage.readString(DesktopStoreKeys.heldIdentify), isNull);
+    });
+
+    test(r'$clearAll on a plain event clears the hold and passes', () async {
+      final interceptor = makeInterceptor();
+      final held = await interceptor.process(identifyEvent({
+        r'$set': {'a': 1}
+      }));
+      expect(held.event, isNull);
+
+      final click = {
+        'event_type': 'click',
+        r'$clearAll': '-',
+        'user_properties': {r'$clearAll': '-'},
+      };
+      final result = await interceptor.process(click);
+      expect(result.event, same(click));
+      expect(result.transfers, isEmpty);
+      expect(await interceptor.transfer(), isNull);
+    });
+
+    test('events without a properties map pass straight through', () async {
+      final interceptor = makeInterceptor();
+      final plain = {'event_type': 'click'};
+      final result = await interceptor.process(plain);
+
+      expect(result.event, same(plain));
+      expect(result.transfers, isEmpty);
+      expect(await interceptor.transfer(), isNull);
+    });
+
+    test(r'$identify without properties is not interceptible', () async {
+      final interceptor = makeInterceptor();
+      final result = await interceptor.process({
+        'event_type': r'$identify',
+      });
+
+      expect(result.event?['event_type'], r'$identify');
+      expect(result.transfers, isEmpty);
+    });
+
+    test('numeric user and device ids coerce to strings', () async {
+      final interceptor = makeInterceptor();
+      final held = await interceptor.process({
+        'event_type': r'$identify',
+        'user_properties': {
+          r'$set': {'a': 1}
+        },
+        'user_id': 42,
+        'device_id': 7,
+      });
+      expect(held.event, isNull);
+
+      final combined = await interceptor.transfer();
+      expect(combined!['user_id'], '42');
+      expect(combined['device_id'], '7');
+    });
   });
 }

@@ -1,5 +1,6 @@
 import 'dart:async';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 
 import '../constants.dart';
@@ -41,11 +42,25 @@ class DesktopAmplitudePlugin {
   /// upload every file twice).
   static DesktopAmplitudePlugin? _activePlugin;
 
+  /// Test-only override for the backend factory used by [registerWith].
+  /// Production always uses the default constructor; tests inject scripted
+  /// backends to prove hot-restart retires the previous plugin without
+  /// real I/O. The generated registrant calls the zero-arg [registerWith],
+  /// so this never affects the channel contract.
+  @visibleForTesting
+  static DesktopBackendFactory debugBackendFactory = DesktopBackend.new;
+
+  /// Test-only view of the plugin currently serving the channel.
+  @visibleForTesting
+  static DesktopAmplitudePlugin? get activePluginForTests => _activePlugin;
+
   /// Called by the generated registrant on Linux/Windows (zero-arg shape
   /// verified against the Flutter tool's `flutter_plugins.dart`).
   static void registerWith() {
     final previous = _activePlugin;
-    final next = DesktopAmplitudePlugin();
+    final next = DesktopAmplitudePlugin(
+      backendFactory: debugBackendFactory,
+    );
     _activePlugin = next;
     const MethodChannel('amplitude_flutter')
         .setMethodCallHandler(next.handleMethodCall);

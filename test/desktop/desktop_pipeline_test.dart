@@ -1,14 +1,17 @@
 import 'dart:async';
+import 'dart:collection';
 import 'dart:convert';
 
 import 'package:amplitude_flutter/desktop/desktop_backend.dart';
 import 'package:amplitude_flutter/desktop/desktop_compress.dart';
+import 'package:amplitude_flutter/desktop/desktop_identify_interceptor.dart';
 import 'package:amplitude_flutter/desktop/desktop_storage.dart';
 import 'package:amplitude_flutter/desktop/desktop_system_info.dart';
 import 'package:amplitude_flutter/desktop/desktop_transport.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 class FakeClock {
   int nowMs = 1700000000000;
@@ -32,6 +35,124 @@ class FakeSystemInfo implements DesktopSystemInfoSource {
 class FakeAppInfo implements DesktopAppInfoSource {
   @override
   Future<DesktopAppVersion> current() async => fakeApp;
+}
+
+/// System-info source that always fails: proves a host lookup failure
+/// degrades to fallbacks instead of refusing init.
+class ThrowingSystemInfo implements DesktopSystemInfoSource {
+  @override
+  Future<DesktopOsInfo> currentOs() => throw StateError('no device info');
+}
+
+/// Storage that fails writes on demand: proves a failing disk drops events
+/// without ever rejecting the caller's track() future.
+class FailingStorage extends InMemoryDesktopStorage {
+  FailingStorage({
+    required super.clock,
+    this.failAppend = false,
+    this.failWriteInt = false,
+  });
+
+  final bool failAppend;
+  final bool failWriteInt;
+
+  @override
+  Future<void> appendEvent(String jsonLine) async {
+    if (failAppend) {
+      throw StateError('disk full');
+    }
+    return super.appendEvent(jsonLine);
+  }
+
+  @override
+  Future<void> writeInt(String key, int value) async {
+    if (failWriteInt) {
+      throw StateError('disk full');
+    }
+    return super.writeInt(key, value);
+  }
+}
+
+/// Storage that lists the same unreadable file twice: exercises the flush
+/// loop's `skip` set, which must deduplicate a corrupt listing instead of
+/// quarantining (and logging) the same file twice.
+class DuplicateListingStorage extends InMemoryDesktopStorage {
+  DuplicateListingStorage(int Function() clock) : super(clock: clock);
+
+  int quarantines = 0;
+
+  @override
+  Future<List<String>> listFilesOldestFirst() async => ['v2-dup', 'v2-dup'];
+
+  @override
+  Future<String?> readFile(String name) async => null;
+
+  @override
+  Future<int?> fileCreatedAt(String name) async => 0;
+
+  @override
+  Future<void> quarantineFile(String name) async {
+    quarantines += 1;
+  }
+}
+
+/// Storage whose sealed files read as missing while their creation times
+/// survive: exercises the flush loop's own listed-but-unreadable branch,
+/// which the expiry backstop (creation time missing) never reaches.
+class BlindReadStorage extends InMemoryDesktopStorage {
+  BlindReadStorage({required super.clock, required this.blind});
+
+  final Set<String> blind;
+
+  @override
+  Future<String?> readFile(String name) async {
+    if (blind.contains(name)) {
+      return null;
+    }
+    return super.readFile(name);
+  }
+}
+
+/// Manual-fire one-shot timer for the backend's identify seam.
+class BackendManualTimer implements Timer {
+  BackendManualTimer();
+  void Function()? callback;
+
+  void fire() => callback!();
+
+  @override
+  void cancel() {}
+
+  @override
+  bool get isActive => true;
+
+  @override
+  int get tick => 0;
+}
+
+/// Map whose reads throw: the only input that can make
+/// `translateDesktopEvent` throw. Every other hostile shape (wrong-typed
+/// plain values) is handled total by `is`-checks — and `== null` never
+/// dispatches `operator==`, so a throwing `==` would NOT reach the catch
+/// (verified). A throwing `[]` on a nested map does: the top-level event
+/// map is always plain (track() copies it), but nested values keep their
+/// runtime type through the shallow copy.
+class _ThrowingMap extends MapBase<String, dynamic> {
+  @override
+  dynamic operator [](Object? key) => throw StateError('hostile []');
+
+  @override
+  void operator []=(String key, dynamic value) =>
+      throw StateError('hostile []=');
+
+  @override
+  void clear() {}
+
+  @override
+  Iterable<String> get keys => const [];
+
+  @override
+  dynamic remove(Object? key) => null;
 }
 
 class Terminal {
@@ -165,20 +286,28 @@ void main() {
     DesktopTransport? transport,
     Duration reprobeInterval = const Duration(hours: 6),
     Map<String, dynamic>? config,
+    DesktopStorage? storageOverride,
+    DesktopSystemInfoSource? systemOverride,
+    DesktopAppInfoSource? appOverride,
+    DesktopTerminalCallback? terminalOverride,
+    DesktopTimerFactory? timerOverride,
   }) async {
     final backend = DesktopBackend(
-      storage: storage,
-      systemInfo: FakeSystemInfo(),
-      appInfo: FakeAppInfo(),
+      storage: storageOverride ?? storage,
+      systemInfo: systemOverride ?? FakeSystemInfo(),
+      appInfo: appOverride ?? FakeAppInfo(),
       transport: transport ?? makeTransport(),
       clock: clock.call,
       sleeper: (duration) async {
         sleeps.add(duration);
       },
       offlineReprobeInterval: reprobeInterval,
-      onTerminalEvent: (event, code, message) {
-        terminals.add(Terminal(event['event_type'] as String?, code, message));
-      },
+      identifyTimerFactory: timerOverride,
+      onTerminalEvent: terminalOverride ??
+          (event, code, message) {
+            terminals
+                .add(Terminal(event['event_type'] as String?, code, message));
+          },
       logger: logs.add,
     );
     backends.add(backend);
@@ -596,6 +725,20 @@ void main() {
       expect(uploadedEventTypes(), contains('x'));
     });
 
+    test('a throwing nested map drops the event, never the track call',
+        () async {
+      final backend = await makeBackend();
+      await backend.track({
+        'event_type': 'x',
+        'ingestion_metadata': _ThrowingMap(),
+      }).timeout(const Duration(seconds: 5));
+      await backend.flush();
+
+      expect(requests, isEmpty,
+          reason: 'translate threw before the session opened: nothing stored');
+      expect(await storage.listFilesOldestFirst(), isEmpty);
+    });
+
     test('transfer enqueues do not auto-flush', () async {
       final backend = await makeBackend(
         config: configMap(flushQueueSize: 1),
@@ -629,6 +772,588 @@ void main() {
       expect(await backend.getDeviceId(), isNull);
       expect(await backend.getSessionId(), -1);
       await backend.dispose();
+    });
+
+    test('missing trackingOptions means everything tracked', () async {
+      final config = Map<String, dynamic>.from(configMap())
+        ..remove('trackingOptions');
+      final backend = await makeBackend(config: config);
+      await backend.track({'event_type': 'a'});
+      await backend.flush();
+
+      final payload = decodeUpload(requests.single);
+      final event = (payload['events'] as List).last as Map;
+      expect(event['platform'], 'Linux',
+          reason: 'absent options default to tracked, never to dropped');
+    });
+
+    test('below-floor identifyBatchInterval warns through the backend log',
+        () async {
+      await makeBackend(config: {
+        ...configMap(),
+        'identifyBatchIntervalMillis': 1000,
+        'logLevel': 'warn',
+      });
+      expect(
+        logs.join('\n'),
+        contains('30000'),
+        reason: 'the 30 s floor warning must reach host logs, not vanish',
+      );
+    });
+
+    test('a failing system-info source falls back instead of refusing init',
+        () async {
+      final backend = await makeBackend(systemOverride: ThrowingSystemInfo());
+      await backend.track({'event_type': 'a'});
+      await backend.flush();
+
+      final payload = decodeUpload(requests.single);
+      final event = (payload['events'] as List).first as Map;
+      expect(event['platform'], 'Unknown',
+          reason: 'a host lookup failure degrades; init must still succeed');
+    });
+
+    test('identify timer expiry drains the hold through the backend', () async {
+      BackendManualTimer? timer;
+      final backend = await makeBackend(timerOverride: (duration, callback) {
+        timer = BackendManualTimer()..callback = callback;
+        return timer!;
+      });
+      await backend.identify({
+        'event_type': r'$identify',
+        'user_properties': {
+          r'$set': {'plan': 'pro'}
+        },
+      });
+      expect(timer, isNotNull);
+
+      timer!.fire();
+      await backend.flush();
+
+      expect(uploadedEventTypes(), ['session_start', r'$identify']);
+    });
+
+    test('setForeground(false) lets the session gap rotate', () async {
+      final backend = await makeBackend(config: {
+        ...configMap(),
+        'minTimeBetweenSessionsMillis': 1000,
+      });
+      await backend.track({'event_type': 'a'});
+      final first = await backend.getSessionId();
+
+      backend.setForeground(false);
+      clock.nowMs += 5000;
+      await backend.track({'event_type': 'b'});
+      expect(await backend.getSessionId(), isNot(first));
+
+      await backend.flush();
+      expect(
+        uploadedEventTypes(),
+        containsAll(['session_end', 'session_start']),
+        reason: 'background past the gap closes the old session',
+      );
+    });
+
+    test('onEnterForeground starts a new session past the gap', () async {
+      final backend = await makeBackend(config: {
+        ...configMap(),
+        'minTimeBetweenSessionsMillis': 1000,
+      });
+      await backend.track({'event_type': 'a'});
+      final first = await backend.getSessionId();
+
+      clock.nowMs += 5000;
+      await backend.onEnterForeground(clock.nowMs);
+      expect(await backend.getSessionId(), clock.nowMs);
+      expect(await backend.getSessionId(), isNot(first));
+
+      await backend.flush();
+      final payload = decodeUpload(requests.single);
+      final starts = (payload['events'] as List)
+          .where((e) => (e as Map)['event_type'] == 'session_start');
+      expect(
+          starts.map((e) => (e as Map)['session_id']), contains(clock.nowMs));
+    });
+
+    test('tracking a bare session start stores it once, not twice', () async {
+      final backend = await makeBackend();
+      await backend.track({'event_type': 'session_start'});
+      await backend.flush();
+
+      // The dummy is consumed (null main): its preceding start uploads,
+      // and no second copy follows it into the queue.
+      expect(uploadedEventTypes(), ['session_start']);
+    });
+
+    test('onEnterForeground with no session starts one', () async {
+      final backend = await makeBackend();
+      expect(await backend.getSessionId(), -1);
+
+      // Cold start entering the foreground: the dummy is consumed and a
+      // session opens, exactly as if the first event had arrived.
+      await backend.onEnterForeground(clock.nowMs);
+      expect(await backend.getSessionId(), clock.nowMs);
+
+      await backend.flush();
+      expect(uploadedEventTypes(), ['session_start']);
+    });
+
+    test('onExitForeground flushes when close-flush is on', () async {
+      final backend = await makeBackend();
+      await backend.track({'event_type': 'a'});
+
+      await backend.onExitForeground(clock.nowMs);
+      expect(requests, hasLength(1),
+          reason: 'hosts rely on this flush at window close');
+      expect(await backend.getSessionId(), isNot(-1),
+          reason: 'exit never ends the session');
+    });
+
+    test('onExitForeground only stamps time when close-flush is off', () async {
+      final backend = await makeBackend(config: {
+        ...configMap(),
+        'flushEventsOnClose': false,
+      });
+      await backend.track({'event_type': 'a'});
+      final first = await backend.getSessionId();
+
+      await backend.onExitForeground(clock.nowMs);
+      expect(requests, isEmpty);
+
+      // The stamped time extends the session for the next event.
+      clock.nowMs += 100;
+      await backend.track({'event_type': 'b'});
+      expect(await backend.getSessionId(), first);
+    });
+
+    test('a refusing queue drops the event without rejecting track', () async {
+      final backend = await makeBackend(
+        storageOverride: FailingStorage(clock: clock.call, failAppend: true),
+      );
+      await backend.track({'event_type': 'a'}).timeout(
+        const Duration(seconds: 5),
+      );
+      await backend.flush();
+      expect(requests, isEmpty);
+    });
+
+    test('failing session bookkeeping does not reject track', () async {
+      final failing = FailingStorage(clock: clock.call, failWriteInt: true);
+      final backend = await makeBackend(storageOverride: failing);
+      await backend.track({'event_type': 'a'}).timeout(
+        const Duration(seconds: 5),
+      );
+      expect(await failing.listFilesOldestFirst(), isEmpty);
+    });
+
+    test('a throwing terminal callback cannot break flush', () async {
+      final backend = await makeBackend(
+        config: {
+          ...configMap(),
+          'logLevel': 'warn',
+        },
+        terminalOverride: (event, code, message) {
+          throw StateError('host callback blew up');
+        },
+      );
+      await backend.track({'event_type': 'a'});
+      await backend.flush().timeout(const Duration(seconds: 5));
+
+      expect(requests, hasLength(1),
+          reason: 'the upload already succeeded; only the callback failed');
+      expect(logs.join('\n'), contains('terminal callback threw'));
+    });
+
+    test('flush transfers a held identify with no triggering event', () async {
+      final backend = await makeBackend();
+      await backend.identify({
+        'event_type': r'$identify',
+        'user_properties': {
+          r'$set': {'plan': 'pro'}
+        },
+      });
+      await backend.flush();
+
+      expect(uploadedEventTypes(), ['session_start', r'$identify']);
+    });
+
+    test('empty queue files are removed at flush without uploading', () async {
+      final backend = await makeBackend();
+      await storage.writeFile('v2-9', '');
+      await backend.flush();
+
+      expect(await storage.listFilesOldestFirst(), isEmpty);
+      expect(requests, isEmpty);
+    });
+
+    test('transport exceptions exhaust retries and trip offline silently',
+        () async {
+      final backend = await makeBackend(
+        config: {
+          ...configMap(),
+          'flushMaxRetries': 1,
+        },
+      );
+      await backend.track({'event_type': 'a'});
+      script.add(() => throw http.ClientException('down'));
+      script.add(() => throw http.ClientException('still down'));
+
+      await backend.flush();
+      await backend.flush();
+      expect(requests, hasLength(2));
+      expect(terminals, isEmpty);
+      expect(await storage.listFilesOldestFirst(), hasLength(1));
+
+      // Offline now: further flushes send nothing until a probe heals.
+      await backend.flush();
+      expect(requests, hasLength(2));
+    });
+
+    test('a partial 400 covering every event removes the file', () async {
+      final backend = await makeBackend();
+      await backend.track({'event_type': 'a'});
+      await backend.track({'event_type': 'b'});
+      script.add(() => http.Response(
+          '{"events_with_invalid_fields": {"event_type": [0, 1, 2]}}', 400));
+      await backend.flush();
+
+      expect(await storage.listFilesOldestFirst(), isEmpty);
+      expect(terminals.map((t) => '${t.eventType}:${t.code}'),
+          ['session_start:400', 'a:400', 'b:400']);
+    });
+
+    test('listed-but-unreadable files are quarantined at flush', () async {
+      final blind = <String>{};
+      final wrapped = BlindReadStorage(clock: clock.call, blind: blind);
+      final backend = await makeBackend(storageOverride: wrapped);
+      await backend.track({'event_type': 'good'});
+      final sealed = await wrapped.sealCurrentFile();
+      blind.add(sealed!);
+      await backend.flush();
+
+      expect(await wrapped.listFilesOldestFirst(), isEmpty);
+      expect(requests, isEmpty,
+          reason: 'nothing readable was ever uploaded from the blind file');
+      expect(terminals, isEmpty);
+    });
+
+    test('init state and config are observable for tests', () async {
+      final fresh = DesktopBackend();
+      expect(fresh.isInitialized, isFalse);
+      expect(fresh.configForTests, isNull);
+      await fresh.dispose();
+
+      final backend = await makeBackend();
+      expect(backend.isInitialized, isTrue);
+      expect(backend.configForTests?.apiKey, 'test-key');
+    });
+
+    test('default storage and system sources degrade gracefully', () async {
+      TestWidgetsFlutterBinding.ensureInitialized();
+      SharedPreferences.setMockInitialValues({});
+      final backend = DesktopBackend(
+        transport: makeTransport(),
+        clock: clock.call,
+        sleeper: (duration) async {
+          sleeps.add(duration);
+        },
+        onTerminalEvent: (event, code, message) {
+          terminals
+              .add(Terminal(event['event_type'] as String?, code, message));
+        },
+        logger: logs.add,
+      );
+      backends.add(backend);
+      expect(await backend.init(configMap()), isTrue);
+
+      await backend.track({'event_type': 'a'});
+      await backend.flush();
+
+      final payload = decodeUpload(requests.single);
+      final event = (payload['events'] as List).first as Map;
+      expect(event['platform'], 'Unknown',
+          reason: 'no platform channel in unit tests; fallbacks must hold');
+      expect(event['device_id'], isNotNull);
+    });
+
+    test('the flush timer uploads without an explicit flush', () async {
+      final backend = await makeBackend(config: {
+        ...configMap(),
+        'flushIntervalMillis': 20,
+      });
+      await backend.track({'event_type': 'a'});
+
+      final deadline = DateTime.now().add(const Duration(seconds: 5));
+      while (requests.isEmpty && DateTime.now().isBefore(deadline)) {
+        await Future<void>.delayed(const Duration(milliseconds: 10));
+      }
+      expect(requests, isNotEmpty,
+          reason: 'the periodic timer must drive uploads on its own');
+    });
+
+    test('autocapture false disables session events', () async {
+      final backend = await makeBackend(config: {
+        ...configMap(),
+        'autocapture': false,
+      });
+      await backend.track({'event_type': 'a'});
+      await backend.flush();
+
+      expect(uploadedEventTypes(), ['a'],
+          reason: 'a bare boolean is a complete sessions answer, not ignored');
+    });
+
+    test('calls before init complete without storing or sending', () async {
+      final backend = DesktopBackend(transport: makeTransport());
+      backends.add(backend);
+      expect(backend.isInitialized, isFalse);
+
+      await backend
+          .track({'event_type': 'early'}).timeout(const Duration(seconds: 5));
+      await backend.flush().timeout(const Duration(seconds: 5));
+
+      expect(requests, isEmpty);
+      expect(terminals, isEmpty);
+    });
+
+    test('a fully held identify stores only its session start', () async {
+      final backend = await makeBackend();
+      await backend.identify({
+        'event_type': r'$identify',
+        'user_properties': {
+          r'$set': {'plan': 'pro'}
+        },
+      });
+
+      final sealed = await storage.sealCurrentFile();
+      expect(sealed, isNotNull);
+      final lines = splitDesktopFileContent((await storage.readFile(sealed!))!);
+      expect(
+        lines.map((e) => json.decode(e)['event_type']),
+        ['session_start'],
+        reason: 'the held body waits for the timer or the next event',
+      );
+    });
+
+    test('a failing probe stays offline without sleeping', () async {
+      final backend = await makeBackend(
+        config: {
+          ...configMap(),
+          'flushMaxRetries': 1,
+        },
+        reprobeInterval: const Duration(milliseconds: 200),
+      );
+      await backend.track({'event_type': 'a'});
+      script.add(() => throw http.ClientException('down'));
+      script.add(() => throw http.ClientException('still down'));
+      script.add(() => throw http.ClientException('probe down'));
+      await backend.flush();
+      await backend.flush();
+      expect(requests, hasLength(2));
+      final sleepsAfterTrip = sleeps.length;
+
+      // One probe attempt fires, fails, and stands down silently.
+      final deadline = DateTime.now().add(const Duration(seconds: 5));
+      while (requests.length < 3 && DateTime.now().isBefore(deadline)) {
+        await Future<void>.delayed(const Duration(milliseconds: 10));
+      }
+      await backend.dispose();
+      expect(requests.length, greaterThanOrEqualTo(3));
+      expect(sleeps, hasLength(sleepsAfterTrip),
+          reason: 'single-attempt probes never back off');
+      expect(terminals, isEmpty);
+    });
+
+    test('a duplicated corrupt listing is quarantined once, not twice',
+        () async {
+      final dups = DuplicateListingStorage(clock.call);
+      final backend = await makeBackend(storageOverride: dups);
+      await backend.flush();
+
+      expect(dups.quarantines, 1);
+      expect(requests, isEmpty,
+          reason: 'the only listed files were unreadable');
+    });
+
+    test('probes run one file: a failed probe trips again, the next heals',
+        () async {
+      final backend = await makeBackend(
+        config: configMap(flushMaxRetries: 1),
+        reprobeInterval: const Duration(milliseconds: 50),
+      );
+      await backend.track({'event_type': 'a'});
+      script.add(() => throw http.ClientException('down'));
+      await backend.flush();
+      expect(sleeps, [const Duration(seconds: 1)]);
+
+      await backend.track({'event_type': 'b'});
+      script.add(() => throw http.ClientException('still down'));
+      await backend.flush();
+      // Second failure (2 > maxRetries 1) trips offline with two files
+      // queued; the 50 ms probe timer is now running.
+      expect(await storage.listFilesOldestFirst(), hasLength(2));
+
+      await backend.track({'event_type': 'c'});
+      // The first probe consumes this throw on the oldest file and trips
+      // offline again (silently: no callbacks, no backoff on the trip
+      // path). The restarted timer's second probe then succeeds on that
+      // file — healing the backend — and stops: single-attempt probes
+      // never walk the queue.
+      script.add(() => throw http.ClientException('probe down'));
+
+      final deadline = DateTime.now().add(const Duration(seconds: 5));
+      while ((requests.length < 4 ||
+              (await storage.listFilesOldestFirst()).length != 2) &&
+          DateTime.now().isBefore(deadline)) {
+        await Future<void>.delayed(const Duration(milliseconds: 10));
+      }
+      expect(requests.length, 4);
+      expect(await storage.listFilesOldestFirst(), hasLength(2));
+      expect(sleeps, [const Duration(seconds: 1)],
+          reason: 'neither the trip nor the healing upload backs off');
+
+      // Healed means online: a normal flush drains the survivors.
+      await backend.flush();
+      expect(await storage.listFilesOldestFirst(), isEmpty);
+      expect(requests.length, 6);
+    });
+
+    test('a stray online probe stands down without uploading', () async {
+      // Race: a probe chain slower than the reprobe interval lets a second
+      // timer callback queue behind it. The first probe heals (cancelling
+      // the timer, which cannot retract the queued callback); the stray
+      // must stand down instead of uploading.
+      final gate = Completer<http.Response>();
+      var calls = 0;
+      final backend = await makeBackend(
+        config: configMap(flushMaxRetries: 1),
+        reprobeInterval: const Duration(milliseconds: 200),
+        transport: DesktopTransport(
+          client: MockClient((request) async {
+            requests.add(request);
+            calls += 1;
+            if (calls == 1) throw http.ClientException('down');
+            if (calls == 2) throw http.ClientException('still down');
+            if (calls == 3) return gate.future;
+            return http.Response('{}', 200);
+          }),
+        ),
+      );
+      await backend.track({'event_type': 'a'});
+      await backend.flush();
+      await backend.track({'event_type': 'b'});
+      await backend.flush();
+      // Tripped offline with two files; the 200 ms probe timer runs.
+      expect(await storage.listFilesOldestFirst(), hasLength(2));
+
+      // First probe hangs mid-upload past the next tick, so a second probe
+      // queues behind it; completing the gate heals via the first probe.
+      final deadline = DateTime.now().add(const Duration(seconds: 5));
+      while (requests.length < 3 && DateTime.now().isBefore(deadline)) {
+        await Future<void>.delayed(const Duration(milliseconds: 10));
+      }
+      expect(requests.length, 3);
+      await Future<void>.delayed(const Duration(milliseconds: 250));
+      gate.complete(http.Response('{}', 200));
+
+      // Let both chains settle: only the first probe may have uploaded.
+      await Future<void>.delayed(const Duration(milliseconds: 300));
+      expect(requests.length, 3,
+          reason: 'the stray probe must not touch the network');
+      expect(await storage.listFilesOldestFirst(), hasLength(1));
+      expect(sleeps, [const Duration(seconds: 1)]);
+
+      // Healed means online: a normal flush drains the survivor.
+      await backend.flush();
+      expect(await storage.listFilesOldestFirst(), isEmpty);
+      expect(requests.length, 4);
+    });
+
+    test('an offline probe with a held identify uploads nothing', () async {
+      final backend = await makeBackend(
+        config: configMap(flushMaxRetries: 1),
+        reprobeInterval: const Duration(milliseconds: 300),
+      );
+      await backend.identify({
+        'event_type': r'$identify',
+        'user_properties': {
+          r'$set': {'plan': 'pro'}
+        },
+      });
+      await backend.track({'event_type': 'a'});
+      script.add(() => throw http.ClientException('down'));
+      await backend.flush();
+      expect(sleeps, [const Duration(seconds: 1)]);
+
+      await backend.identify({
+        'event_type': r'$identify',
+        'user_properties': {
+          r'$set': {'plan': 'team'}
+        },
+      });
+      script.add(() => throw http.ClientException('still down'));
+      await backend.flush();
+      // Tripped offline with two files; the 300 ms probe timer runs.
+      expect(await storage.listFilesOldestFirst(), hasLength(2));
+
+      // A fresh held batch is waiting when the first probe fires: the
+      // probe drains it into the open buffer but must not upload while
+      // offline — that cycle sends nothing.
+      await backend.identify({
+        'event_type': r'$identify',
+        'user_properties': {
+          r'$set': {'plan': 'enterprise'}
+        },
+      });
+      await Future<void>.delayed(const Duration(milliseconds: 450));
+      expect(requests.length, 2,
+          reason: 'the offline probe drains the hold but sends nothing');
+      expect(await storage.listFilesOldestFirst(), hasLength(2));
+
+      // The next probe uploads the oldest file, heals, and stops after
+      // one file; a normal flush then drains the rest.
+      final deadline = DateTime.now().add(const Duration(seconds: 5));
+      while (requests.length < 3 && DateTime.now().isBefore(deadline)) {
+        await Future<void>.delayed(const Duration(milliseconds: 10));
+      }
+      expect(requests.length, 3);
+      await backend.flush();
+      expect(await storage.listFilesOldestFirst(), isEmpty);
+      expect(requests.length, 5);
+    });
+
+    test('backoff sleep doubles then clamps at the maximum', () async {
+      final backend = await makeBackend(config: {
+        ...configMap(),
+        'flushMaxRetries': 100,
+      });
+      await backend.track({'event_type': 'a'});
+      for (var i = 0; i < 8; i++) {
+        script.add(() => throw http.ClientException('down'));
+      }
+      for (var i = 0; i < 8; i++) {
+        await backend.flush();
+      }
+
+      expect(sleeps, [
+        for (final s in [1, 2, 4, 8, 16, 32, 60, 60]) Duration(seconds: s),
+      ]);
+    });
+
+    test('ancient files with corrupt content vanish without terminals',
+        () async {
+      final backend = await makeBackend();
+      await storage.writeFile(
+        'v2-old',
+        'not-json{{{',
+        createdAtMs: clock() - const Duration(days: 31).inMilliseconds,
+      );
+      await backend.flush().timeout(const Duration(seconds: 5));
+
+      expect(await storage.listFilesOldestFirst(), isEmpty);
+      expect(requests, isEmpty);
+      expect(terminals, isEmpty,
+          reason: 'unparseable lines cannot produce per-event callbacks');
     });
   });
 }

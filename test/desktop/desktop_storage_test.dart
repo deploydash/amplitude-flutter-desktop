@@ -93,6 +93,36 @@ void testDesktopStorageConformance(
       expect(await storage.listFilesOldestFirst(), ['v2-0']);
     });
 
+    test('split of a missing file returns its name and changes nothing',
+        () async {
+      expect(await storage.splitFile('v2-missing'), ['v2-missing']);
+      expect(await storage.listFilesOldestFirst(), isEmpty);
+    });
+
+    test('removing a file drops it; removing again is a no-op', () async {
+      await storage.appendEvent('e');
+      await storage.sealCurrentFile();
+      await storage.removeFile('v2-0');
+      expect(await storage.listFilesOldestFirst(), isEmpty);
+      expect(await storage.readFile('v2-0'), isNull);
+      await storage.removeFile('v2-0');
+      expect(await storage.listFilesOldestFirst(), isEmpty);
+    });
+
+    test('a full open file seals itself and appends continue past it',
+        () async {
+      // One line past the 975 KB cap forces the rollover mid-append.
+      final big = 'x' * (975 * 1024);
+      await storage.appendEvent(big);
+      expect(await storage.listFilesOldestFirst(), ['v2-0']);
+
+      await storage.appendEvent('small');
+      expect(await storage.sealCurrentFile(), 'v2-1');
+      expect(await storage.listFilesOldestFirst(), ['v2-0', 'v2-1']);
+      expect((await storage.readFile('v2-0'))!.length, big.length);
+      expect(await storage.readFile('v2-1'), 'small');
+    });
+
     test('writeFile requeues survivors preserving creation time', () async {
       await storage.appendEvent('keep');
       await storage.sealCurrentFile();
@@ -150,6 +180,34 @@ void main() {
 
       await a.clearAll();
       expect(await a.readString('k'), isNull);
+    });
+
+    test('corrupt envelopes read as missing, never throw', () async {
+      // Seeded through the live instance: re-seeding mock initial values
+      // mid-file races the getInstance cache, so write directly instead.
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setString('test-ns/file/v2-0', 'not-json{{{');
+      final storage = SharedPreferencesDesktopStorage(namespace: 'test-ns');
+      await storage.init();
+
+      expect(await storage.readFile('v2-0'), isNull);
+      expect(await storage.fileCreatedAt('v2-0'), isNull);
+      await prefs.remove('test-ns/file/v2-0');
+    });
+
+    test('clearAll sweeps the legacy quarantine prefix too', () async {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setString(
+          'test-ns/quarantine/orphan', '{"createdAt": 1, "content": ""}');
+      final storage = SharedPreferencesDesktopStorage(namespace: 'test-ns');
+      await storage.init();
+      await storage.clearAll();
+
+      expect(
+        prefs.getKeys().where((k) => k.startsWith('test-ns/')),
+        isEmpty,
+        reason: 'upgrades must never orphan quarantined entries',
+      );
     });
   });
 

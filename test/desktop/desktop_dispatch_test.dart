@@ -138,5 +138,49 @@ void main() {
         isA<DispatchRetry>(),
       );
     });
+
+    test('unparseable 429 retries instead of throwing', () {
+      expect(
+        decideDesktopDispatch(
+          statusCode: 429,
+          responseBody: 'not-json{{{',
+          events: events(2),
+        ),
+        isA<DispatchRetry>(),
+      );
+    });
+
+    test('400 naming no event drops the file with the server message', () {
+      final decision = decideDesktopDispatch(
+        statusCode: 400,
+        responseBody: '{"error": "billing expired"}',
+        events: events(2),
+      );
+      expect(decision, isA<DispatchDropFile>());
+      expect((decision as DispatchDropFile).message, 'billing expired');
+    });
+
+    test('400 with a non-integer numeric index still drops it', () {
+      final decision = decideDesktopDispatch(
+        statusCode: 400,
+        responseBody: '{"events_with_invalid_fields": {"event_type": [2.0]}}',
+        events: events(3),
+      );
+      expect(decision, isA<DispatchDropSome>());
+      expect((decision as DispatchDropSome).dropIndexes, {2});
+    });
+
+    test('429 quota lists nested in maps still match', () {
+      final decision = decideDesktopDispatch(
+        statusCode: 429,
+        responseBody: '{"exceededDailyQuotaDevices": {"region": ["device-1"]}}',
+        events: events(2),
+      );
+      expect(decision, isA<DispatchDropSome>());
+      final parts =
+          partitionDesktopEvents(events(2), decision as DispatchDropSome);
+      expect(parts.drop.map((e) => e['device_id']), ['device-1']);
+      expect(parts.keep, hasLength(1));
+    });
   });
 }

@@ -95,6 +95,28 @@ void main() {
       expect(out.containsKey('android_id'), isFalse);
       expect(out['adid'], 'ad-1');
     });
+
+    test('ingestion metadata without a source is dropped, not half-sent', () {
+      final out = translateDesktopEvent({
+        'event_type': 'x',
+        'ingestion_metadata': {'unrelated': 'kept-out'},
+      });
+      expect(out.containsKey('ingestion_metadata'), isFalse);
+    });
+
+    test('plan keeps known keys and drops unknown or empty plans', () {
+      final kept = translateDesktopEvent({
+        'event_type': 'x',
+        'plan': {'branch': 'b', 'junk': 1},
+      });
+      expect(kept['plan'], {'branch': 'b'});
+
+      final dropped = translateDesktopEvent({
+        'event_type': 'x',
+        'plan': {'junk': 1},
+      });
+      expect(dropped.containsKey('plan'), isFalse);
+    });
   });
 
   group('enrichDesktopEvent', () {
@@ -206,6 +228,14 @@ void main() {
       expect(
           enrich({'event_type': 'x', 'idfv': 'v'},
               tracking: const {'idfv': false}).containsKey('idfv'),
+          isFalse);
+    });
+
+    test('adid flag gates explicit adid', () {
+      expect(enrich({'event_type': 'x', 'adid': 'a'})['adid'], 'a');
+      expect(
+          enrich({'event_type': 'x', 'adid': 'a'},
+              tracking: const {'adid': false}).containsKey('adid'),
           isFalse);
     });
   });

@@ -57,6 +57,20 @@ void main() {
 
       await identity.setUserId(null);
       expect(await storage.readString(DesktopStoreKeys.userId), isNull);
+
+      await identity.setDeviceId(null);
+      expect(identity.deviceId, isNull);
+      expect(await storage.readString(DesktopStoreKeys.deviceId), isNull);
+    });
+
+    test('initial userId from init is persisted, not just held', () async {
+      final identity = await load(initialUserId: 'init-user');
+      expect(identity.userId, 'init-user');
+      expect(
+        await storage.readString(DesktopStoreKeys.userId),
+        'init-user',
+        reason: 'a restart must restore the init-provided user, not null',
+      );
     });
 
     test('apiKey change wipes stored identity and queue', () async {

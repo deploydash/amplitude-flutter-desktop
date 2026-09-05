@@ -76,17 +76,21 @@ class DesktopSession {
     final type = rawType is String ? rawType : null;
 
     if (type == 'session_start') {
-      if (_sessionId < 0) {
+      final rawAdopted = event['session_id'];
+      if (rawAdopted == null) {
+        // Dummy start (Swift `skipEvent`): never enqueued; evaluates
+        // extend-vs-new whether or not a session is live, so entering
+        // foreground past the gap rotates the session here instead of
+        // silently extending a stale one.
         preceding.addAll(
             await _startNewSessionIfNeeded(ts, inForeground: inForeground));
         return DesktopSessionResult(preceding: preceding);
       }
       // Adopt the explicitly-started session, then fall through so the
-      // event itself is enqueued with ids assigned.
-      final rawAdopted = event['session_id'];
-      final adopted = rawAdopted is num ? rawAdopted.toInt() : null;
-      if (adopted != null) {
-        _sessionId = adopted;
+      // event itself is enqueued with ids assigned. A non-numeric id is
+      // hostile, not an adoption: time still stamps, the id resets below.
+      if (rawAdopted is num) {
+        _sessionId = rawAdopted.toInt();
         await _persistSession();
       }
       _lastEventTime = ts;

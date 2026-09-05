@@ -109,6 +109,22 @@ void main() {
       );
     });
 
+    test('live dummy within the gap extends without emitting', () async {
+      final session =
+          await makeSession(storage: storage, clock: clock, gapMs: 1000);
+      await session.processEvent(event(), inForeground: true);
+
+      clock.nowMs += 500;
+      final result = await session.processEvent(
+        {'event_type': 'session_start'},
+        inForeground: false,
+      );
+      expect(result.event, isNull,
+          reason: 'dummies never enqueue (Swift skipEvent)');
+      expect(result.preceding, isEmpty);
+      expect(session.sessionId, 1000000);
+    });
+
     test('session_start with a live session adopts its id', () async {
       final session = await makeSession(storage: storage, clock: clock);
       await session.processEvent(event(), inForeground: true);
@@ -160,6 +176,52 @@ void main() {
         inForeground: false,
       );
       expect(result.event?['session_id'], 555);
+    });
+
+    test('explicit per-event event id is kept without bumping the sequence',
+        () async {
+      final session = await makeSession(storage: storage, clock: clock);
+      await session.processEvent(event(), inForeground: true);
+      // First event took event_id 2 (its session_start took 1).
+
+      final result = await session.processEvent(
+        {'event_type': 'x', 'event_id': 41},
+        inForeground: false,
+      );
+      expect(result.event?['event_id'], 41);
+
+      final next = await session.processEvent(event(), inForeground: false);
+      expect(next.event?['event_id'], 3,
+          reason: 'a kept explicit id must not consume the sequence');
+    });
+
+    test('non-integer numeric ids coerce instead of resetting', () async {
+      final session = await makeSession(storage: storage, clock: clock);
+      await session.processEvent(event(), inForeground: true);
+
+      final result = await session.processEvent(
+        {'event_type': 'x', 'session_id': 555.0, 'event_id': 7.0},
+        inForeground: false,
+      );
+      expect(result.event?['session_id'], 555);
+      expect(result.event?['session_id'], isA<int>());
+      expect(result.event?['event_id'], 7);
+      expect(result.event?['event_id'], isA<int>());
+    });
+
+    test('endCurrentSession without tracked events just clears to -1',
+        () async {
+      final session = await makeSession(
+        storage: storage,
+        clock: clock,
+        trackSessionEvents: false,
+      );
+      await session.processEvent(event(), inForeground: true);
+      expect(session.sessionId, isNot(-1));
+
+      final end = await session.endCurrentSession();
+      expect(end, isNull);
+      expect(session.sessionId, -1);
     });
 
     test('disabled session events still track ids', () async {

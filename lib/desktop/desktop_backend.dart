@@ -154,6 +154,9 @@ class DesktopBackend {
     int Function()? clock,
     Future<void> Function(Duration)? sleeper,
     Duration? offlineReprobeInterval,
+    // Test seam for the identify-batch timer (a manual fire proves the
+    // timer drain end to end). Null keeps the real 30 s one-shot.
+    DesktopTimerFactory? identifyTimerFactory,
     this.onTerminalEvent,
     void Function(String message)? logger,
   })  : _injectedStorage = storage,
@@ -161,6 +164,7 @@ class DesktopBackend {
         _appInfoSource = appInfo ?? PackageInfoDesktopAppInfo(),
         _transport = transport ?? DesktopTransport(),
         _clock = clock ?? _wallClock,
+        _identifyTimerFactory = identifyTimerFactory,
         _sleeper = sleeper ?? Future.delayed,
         _reprobeInterval = offlineReprobeInterval ??
             const Duration(hours: DesktopRetry.offlineReprobeHours),
@@ -173,6 +177,7 @@ class DesktopBackend {
   final DesktopAppInfoSource _appInfoSource;
   final DesktopTransport _transport;
   final int Function() _clock;
+  final DesktopTimerFactory? _identifyTimerFactory;
   final Future<void> Function(Duration) _sleeper;
   final Duration _reprobeInterval;
   final DesktopTerminalCallback? onTerminalEvent;
@@ -258,6 +263,7 @@ class DesktopBackend {
         identifyBatchIntervalMillis: config.identifyBatchIntervalMillis,
         clock: _clock,
         onTimerFired: _onIdentifyTimer,
+        timerFactory: _identifyTimerFactory,
         onWarn: (message) => _log(2, message),
       );
       await _interceptor!.restore();
@@ -487,32 +493,30 @@ class DesktopBackend {
   }
 
   Future<void> _storeEvent(Map<String, dynamic> event) async {
-    final config = _config;
-    final identity = _identity;
-    final storage = _storage;
-    if (config == null || identity == null || storage == null) {
-      return;
-    }
-    late final Map<String, dynamic> enriched;
-    try {
-      enriched = enrichDesktopEvent(
-        event: event,
-        tracking: config.trackingOptions,
-        coppa: config.enableCoppaControl,
-        os: _osInfo,
-        app: _appInfo,
-        library: desktopLibrary(),
-        identityUserId: identity.userId,
-        identityDeviceId: identity.deviceId,
-        configPartnerId: config.partnerId,
-        configAppVersion: config.appVersion,
-        language: _language,
-      );
-    } catch (_) {
-      // Hostile input must never reject the caller's track() future.
-      _log(1, 'dropping unenrichable event');
-      return;
-    }
+    // Private: every caller runs after a successful init behind the serial
+    // mutex, and init never clears these — so they are non-null by
+    // construction. (The old null early-return was unreachable: no public
+    // path reaches here before init.)
+    final config = _config!;
+    final identity = _identity!;
+    final storage = _storage!;
+    // No try/catch: `enrichDesktopEvent` is total over its inputs (plain
+    // maps, `is`-checks, `== null` — none invoke host code), so there is
+    // no throw to guard. Non-encodable values drop at the `json.encode`
+    // guard below; refused writes at the storage guard.
+    final enriched = enrichDesktopEvent(
+      event: event,
+      tracking: config.trackingOptions,
+      coppa: config.enableCoppaControl,
+      os: _osInfo,
+      app: _appInfo,
+      library: desktopLibrary(),
+      identityUserId: identity.userId,
+      identityDeviceId: identity.deviceId,
+      configPartnerId: config.partnerId,
+      configAppVersion: config.appVersion,
+      language: _language,
+    );
     enriched['insert_id'] ??= generateDesktopUuid();
     late final String line;
     try {
@@ -561,6 +565,9 @@ class DesktopBackend {
         return;
       }
     } else if (!_offline) {
+      // Stray online probe: a heal already cancelled this timer, but a
+      // callback queued behind a slow in-flight probe still runs. Stand
+      // down without touching the network.
       _cancelReprobe();
       return;
     }
@@ -573,7 +580,8 @@ class DesktopBackend {
       await _enqueueRaw(combined, holdable: false);
       // Transfer enqueues never recurse into a nested chain (see
       // `_enqueueRaw`), but re-check transport state anyway before
-      // touching the network.
+      // touching the network: an offline probe that just drained a held
+      // identify must not upload on that cycle.
       if (_offline || _clock() < _throttleUntilMs) {
         return;
       }
@@ -635,9 +643,12 @@ class DesktopBackend {
           return;
         }
         await _sleeper(_backoffFor(_failures));
-        if (singleAttempt) {
-          return;
-        }
+        // No single-attempt early-return here. Online probes return at the
+        // entry guard above, and an offline probe is always over budget
+        // (only `_tripOffline` sets offline, only when over budget; only
+        // a success resets it, which heals and returns below) — so a
+        // probe can never fail within budget. Falling through to the
+        // loop-end single-attempt return is correct regardless.
         continue;
       }
       final decision = decideDesktopDispatch(
@@ -741,10 +752,10 @@ class DesktopBackend {
   // A null creation time means a corrupt envelope (§B.3): quarantine so it
   // can never wedge the queue.
   Future<void> _discardExpired(int nowMs) async {
-    final storage = _storage;
-    if (storage == null) {
-      return;
-    }
+    // Private: the sole caller checked non-null with no await in between,
+    // so this cannot be null (single-threaded). The old null early-return
+    // was unreachable.
+    final storage = _storage!;
     final cutoff = nowMs - DesktopRetry.maxFileAgeDays * 24 * 3600 * 1000;
     for (final name in await storage.listFilesOldestFirst()) {
       final createdAt = await storage.fileCreatedAt(name);
