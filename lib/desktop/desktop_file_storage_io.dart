@@ -4,6 +4,7 @@ import 'dart:io';
 import 'package:flutter/foundation.dart';
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 import 'desktop_constants.dart';
 import 'desktop_storage.dart';
@@ -242,20 +243,27 @@ class FileDesktopStorage implements DesktopStorage {
     }
   }
 
+  /// First free path for [base] inside [dirPath]: the base itself, else
+  /// `base-1`, `base-2`, ... Never overwrites: a killed process may leave a
+  /// previous attempt behind, and evidence must survive retries.
+  Future<String> _firstFreePath(String dirPath, String base) async {
+    var candidate = p.join(dirPath, base);
+    var suffix = 1;
+    while (await File(candidate).exists()) {
+      candidate = p.join(dirPath, '$base-$suffix');
+      suffix += 1;
+    }
+    return candidate;
+  }
+
   /// First free sealed name for [index]: `v2-<n>`, else `v2-<n>-1`,
-  /// `v2-<n>-2`, ... Never overwrites. Suffixes sort after the bare name
+  /// `v2-<n>-2`, ... Suffixes sort after the bare name
   /// (`desktopFileSortIndex` reads the leading digits), so the colliding
   /// content still uploads oldest-first right behind its namesake.
   Future<String> _sealedCollisionFree(int index) async {
-    final base = DesktopQueueFiles.sealedName(index);
-    if (!await File(p.join(_dir.path, base)).exists()) {
-      return base;
-    }
-    var suffix = 1;
-    while (await File(p.join(_dir.path, '$base-$suffix')).exists()) {
-      suffix += 1;
-    }
-    return '$base-$suffix';
+    final full =
+        await _firstFreePath(_dir.path, DesktopQueueFiles.sealedName(index));
+    return p.basename(full);
   }
 
   /// Derives the next sequence number by scanning the directory, so a
@@ -533,13 +541,111 @@ class FileDesktopStorage implements DesktopStorage {
     await dir.create(recursive: true);
     // Collision-safe: earlier evidence under the same name is never
     // overwritten (a killed process may quarantine the same name twice).
-    var dest = p.join(dir.path, name);
-    var suffix = 1;
-    while (await File(dest).exists()) {
-      dest = p.join(dir.path, '$name-$suffix');
-      suffix += 1;
+    await file.rename(await _firstFreePath(dir.path, name));
+  }
+
+  /// Stores diagnostic [bytes] under [name] in the quarantine directory
+  /// without ever overwriting earlier evidence.
+  Future<void> _quarantineBytes(String name, List<int> bytes) async {
+    final dir = Directory(p.join(_dir.path, '.quarantine'));
+    await dir.create(recursive: true);
+    final dest = await _firstFreePath(dir.path, p.basename(name));
+    await File(dest).writeAsBytes(bytes, flush: true);
+  }
+
+  /// Imports a legacy `shared_preferences` event queue (written by
+  /// `SharedPreferencesDesktopStorage` for existing fork installations)
+  /// into this filesystem queue. Idempotent: rerunning after a crash
+  /// verifies and reuses an already-committed destination instead of
+  /// duplicating events, and only then removes the legacy key.
+  ///
+  /// WHY a method here instead of in the backend: the frozen legacy key
+  /// layout (`<namespace>/file/<name>`, `<namespace>/.quarantine/<name>`)
+  /// and the filesystem commit/verify steps both live with the code that
+  /// owns the destination format. Undecodable envelopes are preserved as
+  /// quarantined bytes for diagnosis — never silently deleted.
+  Future<void> importLegacyPreferenceQueue(SharedPreferences prefs) async {
+    _requireInit();
+    final filePrefix = '$_namespace/file/';
+    final names = prefs
+        .getKeys()
+        .where((key) => key.startsWith(filePrefix))
+        .map((key) => key.substring(filePrefix.length))
+        .toList()
+      ..sort();
+    for (final name in names) {
+      final key = '$filePrefix$name';
+      // `get` (not `getString`): a foreign-typed value under our prefix
+      // must be skipped, and `getString` throws on it instead of null.
+      final raw = prefs.get(key);
+      if (raw is! String) {
+        continue;
+      }
+      String? content;
+      int? createdAt;
+      try {
+        final envelope = json.decode(raw) as Map<String, dynamic>;
+        final body = envelope['content'];
+        final stamped = envelope['createdAt'];
+        if (body is String) {
+          content = body;
+        }
+        if (stamped is num) {
+          createdAt = stamped.toInt();
+        }
+      } catch (_) {
+        // Falls through to the quarantine path below.
+      }
+      final logical = name.endsWith('.tmp')
+          ? name.substring(0, name.length - '.tmp'.length)
+          : name;
+      if (content == null || createdAt == null || !_isUploadable(logical)) {
+        await _quarantineBytes(name, utf8.encode(raw));
+        await prefs.remove(key);
+        continue;
+      }
+      if (content.isEmpty) {
+        await prefs.remove(key);
+        continue;
+      }
+      if (await readFile(logical) == content) {
+        // A previous run committed the destination but died before
+        // removing the source: reuse it instead of duplicating.
+        await prefs.remove(key);
+        continue;
+      }
+      final dest = p.basename(await _firstFreePath(_dir.path, logical));
+      final file = File(p.join(_dir.path, dest));
+      await file.writeAsBytes(
+          utf8.encode('$content${DesktopQueueFiles.delimiter}'),
+          flush: true);
+      await file
+          .setLastModified(DateTime.fromMillisecondsSinceEpoch(createdAt));
+      if (await readFile(dest) != content) {
+        throw StateError('legacy migration verification failed for $name');
+      }
+      await prefs.remove(key);
     }
-    await file.rename(dest);
+    for (final quarantinePrefix in [
+      '$_namespace/.quarantine/',
+      '$_namespace/quarantine/',
+    ]) {
+      final quarantined = prefs
+          .getKeys()
+          .where((key) => key.startsWith(quarantinePrefix))
+          .map((key) => key.substring(quarantinePrefix.length))
+          .toList()
+        ..sort();
+      for (final name in quarantined) {
+        final key = '$quarantinePrefix$name';
+        final raw = prefs.get(key);
+        if (raw is! String) {
+          continue;
+        }
+        await _quarantineBytes(name, utf8.encode(raw));
+        await prefs.remove(key);
+      }
+    }
   }
 
   @override

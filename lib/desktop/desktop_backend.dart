@@ -1,11 +1,14 @@
 import 'dart:async';
 import 'dart:convert';
 
+import 'package:shared_preferences/shared_preferences.dart';
+
 import '../constants.dart';
 import 'desktop_constants.dart';
 import 'desktop_dispatch.dart';
 import 'desktop_endpoint.dart';
 import 'desktop_enricher.dart';
+import 'desktop_file_storage_io.dart';
 import 'desktop_identify_interceptor.dart';
 import 'desktop_identity.dart';
 import 'desktop_payload.dart';
@@ -236,10 +239,14 @@ class DesktopBackend {
       _pendingCount = 0;
       _isFlushing = false;
 
-      _storage = _injectedStorage ??
-          SharedPreferencesDesktopStorage(
-              namespace: 'storage-${config.apiKey}-${config.instanceName}');
-      await _storage!.init();
+      _storage = _injectedStorage;
+      if (_storage == null) {
+        _storage = await _defaultFileStorage(
+          'storage-${config.apiKey}-${config.instanceName}',
+        );
+      } else {
+        await _storage!.init();
+      }
 
       _identity = DesktopIdentity(storage: _storage!);
       await _identity!.load(
@@ -291,8 +298,7 @@ class DesktopBackend {
       if (combined != null) {
         // Timer drains originate outside any flush, so they may trigger the
         // threshold flush themselves.
-        await _enqueueRaw(combined,
-            holdable: false, allowAutoFlush: true);
+        await _enqueueRaw(combined, holdable: false, allowAutoFlush: true);
       }
     }));
   }
@@ -303,6 +309,30 @@ class DesktopBackend {
     _reprobeTimer?.cancel();
     _reprobeTimer = null;
     _interceptor?.dispose();
+  }
+
+  /// Production queue default: the crash-safe filesystem store, migrating
+  /// any legacy preferences queue once. Falls back to preferences when the
+  /// device-local directory is unavailable, rather than refusing init —
+  /// the queue stays usable, only its crash-safety degrades.
+  Future<DesktopStorage> _defaultFileStorage(String namespace) async {
+    try {
+      final files = FileDesktopStorage(namespace: namespace);
+      await files.init();
+      try {
+        await files.importLegacyPreferenceQueue(
+          await SharedPreferences.getInstance(),
+        );
+      } catch (e) {
+        _log(1, 'legacy queue migration deferred: $e');
+      }
+      return files;
+    } catch (e) {
+      _log(1, 'file queue unavailable, using preferences: $e');
+      final prefs = SharedPreferencesDesktopStorage(namespace: namespace);
+      await prefs.init();
+      return prefs;
+    }
   }
 
   /// Releases timers and the owned HTTP client. Test/close hook — the
@@ -481,8 +511,7 @@ class DesktopBackend {
       // never silently dropped. They defer their own threshold flush so the
       // outer input appends everything in order first.
       for (final transfer in intercept.transfers) {
-        await _enqueueRaw(transfer,
-            holdable: false, allowAutoFlush: false);
+        await _enqueueRaw(transfer, holdable: false, allowAutoFlush: false);
       }
       final toStore = intercept.event;
       if (toStore == null) {
@@ -606,8 +635,7 @@ class DesktopBackend {
       // (the in-flush guard in `_maybeAutoFlush` stands it down).
       final combined = await _interceptor?.transfer();
       if (combined != null) {
-        await _enqueueRaw(combined,
-            holdable: false, allowAutoFlush: true);
+        await _enqueueRaw(combined, holdable: false, allowAutoFlush: true);
         // Re-check offline before touching the network: an offline probe
         // that just drained a held identify must not upload on that cycle.
         if (_offline) {
@@ -651,8 +679,8 @@ class DesktopBackend {
         late final List<Map<String, dynamic>> events;
         try {
           events = splitDesktopFileContent(raw)
-              .map((line) =>
-                  Map<String, dynamic>.from(json.decode(line) as Map))
+              .map(
+                  (line) => Map<String, dynamic>.from(json.decode(line) as Map))
               .toList();
         } catch (_) {
           // One corrupt file must never wedge the queue.

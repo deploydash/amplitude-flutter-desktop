@@ -298,16 +298,17 @@ class _StoredFile {
   final String content;
 }
 
-// Default persisted [DesktopStorage] backed by `shared_preferences`.
+// Explicitly-injected compatibility [DesktopStorage] backed by
+// `shared_preferences`.
 //
-// WHY prefs instead of raw files: `shared_preferences` is Aptabase-proven
-// on Linux/Windows/macOS, ships a web implementation (so `lib/desktop/`
-// keeps compiling for web — the plan §1.6 ban on `dart:io`), and needs no
-// host-provided directory. Queue "files" are prefs entries holding a small
-// envelope (`createdAt` + content), which preserves every §B.2/§B.3
-// semantic (oldest-first, split, quarantine, 30-day age). Hosts that prefer
-// real files inject their own [DesktopStorage]; the SDK only needs the
-// interface.
+// Durability limits (read before relying on this): the plugin writes may be
+// persisted asynchronously after the returned future completes, so this
+// store must not be used for critical delivery data — a kill can lose an
+// acknowledged event. It is kept only for hosts that explicitly inject it
+// (and for the one-time migration source in `importLegacyPreferenceQueue`);
+// production Windows/Linux defaults to the crash-safe filesystem queue.
+// It ships a web implementation, so `lib/desktop/` keeps compiling for web
+// (the plan §1.6 ban on `dart:io`), and needs no host-provided directory.
 class SharedPreferencesDesktopStorage implements DesktopStorage {
   SharedPreferencesDesktopStorage({
     required String namespace,

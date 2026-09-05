@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:collection';
 import 'dart:convert';
+import 'dart:io';
 
 import 'package:amplitude_flutter/desktop/desktop_backend.dart';
 import 'package:amplitude_flutter/desktop/desktop_compress.dart';
@@ -8,6 +9,7 @@ import 'package:amplitude_flutter/desktop/desktop_identify_interceptor.dart';
 import 'package:amplitude_flutter/desktop/desktop_storage.dart';
 import 'package:amplitude_flutter/desktop/desktop_system_info.dart';
 import 'package:amplitude_flutter/desktop/desktop_transport.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
@@ -373,8 +375,7 @@ void main() {
         expect(event.containsKey('time'), isTrue,
             reason: 'wire events must contain time');
       }
-      final main =
-          events.cast<Map>().firstWhere((e) => e['event_type'] == 'a');
+      final main = events.cast<Map>().firstWhere((e) => e['event_type'] == 'a');
       expect(main['time'], 1700000001234);
     });
 
@@ -589,8 +590,7 @@ void main() {
       expect(terminals.map((t) => t.code), [200, 200]);
     });
 
-    test('retryable failure retries the same file within one flush',
-        () async {
+    test('retryable failure retries the same file within one flush', () async {
       final backend = await makeBackend();
       await backend.track({'event_type': 'a'});
       script.add(() => http.Response('boom', 500));
@@ -648,8 +648,7 @@ void main() {
         expect(types, contains('session_start'));
         expect(types, isNot(contains('b')));
       }
-      expect(sleeps,
-          [const Duration(seconds: 1), const Duration(seconds: 2)]);
+      expect(sleeps, [const Duration(seconds: 1), const Duration(seconds: 2)]);
       expect(terminals, isEmpty);
       expect(await storage.listFilesOldestFirst(), hasLength(2));
     });
@@ -782,16 +781,14 @@ void main() {
       expect(await storage.listFilesOldestFirst(), isEmpty);
     });
 
-    test('opt-out keeps queued events for opt-in later in same run',
-        () async {
+    test('opt-out keeps queued events for opt-in later in same run', () async {
       final backend = await makeBackend();
       await backend.track({'event_type': 'a'});
       await backend.setOptOut(true);
       await backend.track({'event_type': 'b'});
       await backend.flush();
 
-      expect(requests, isEmpty,
-          reason: 'opted-out flush must not upload');
+      expect(requests, isEmpty, reason: 'opted-out flush must not upload');
 
       await backend.setOptOut(false);
       await backend.flush();
@@ -1456,6 +1453,145 @@ void main() {
       expect(event['platform'], 'Unknown',
           reason: 'no platform channel in unit tests; fallbacks must hold');
       expect(event['device_id'], isNotNull);
+    });
+
+    /// Points `path_provider` at a temporary directory for the test.
+    Future<Directory> mockApplicationSupport() async {
+      TestWidgetsFlutterBinding.ensureInitialized();
+      SharedPreferences.setMockInitialValues({});
+      final temp = await Directory.systemTemp.createTemp('amplitude-support-');
+      const channel = MethodChannel('plugins.flutter.io/path_provider');
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(channel, (call) async {
+        if (call.method == 'getApplicationSupportDirectory') {
+          return temp.path;
+        }
+        return null;
+      });
+      return temp;
+    }
+
+    void unmockApplicationSupport() {
+      const channel = MethodChannel('plugins.flutter.io/path_provider');
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(channel, null);
+    }
+
+    DesktopBackend defaultBackend() {
+      final backend = DesktopBackend(
+        transport: makeTransport(),
+        clock: clock.call,
+        sleeper: (duration) async {
+          sleeps.add(duration);
+        },
+        onTerminalEvent: (event, code, message) {
+          terminals
+              .add(Terminal(event['event_type'] as String?, code, message));
+        },
+        logger: logs.add,
+      );
+      backends.add(backend);
+      return backend;
+    }
+
+    test(
+        'default backend uses the filesystem queue and migrates legacy entries',
+        () async {
+      final support = await mockApplicationSupport();
+      try {
+        final prefs = await SharedPreferences.getInstance();
+        final nowMs = DateTime.now().millisecondsSinceEpoch;
+        await prefs.setString(
+          'storage-test-key-test/file/v2-0',
+          json.encode({
+            'createdAt': nowMs,
+            'content': '{"event_type":"legacy"}',
+          }),
+        );
+        final backend = defaultBackend();
+        expect(await backend.init(configMap()), isTrue);
+        await backend.track({'event_type': 'b'});
+        await backend.flush();
+
+        // The legacy preference queue migrated exactly once...
+        expect(
+          prefs
+              .getKeys()
+              .where((k) => k.startsWith('storage-test-key-test/file/')),
+          isEmpty,
+        );
+        // ...into a real application-support subdirectory (not preferences).
+        final supportEntries = await support.list().toList();
+        expect(supportEntries.whereType<Directory>(), hasLength(1));
+        expect(uploadedEventTypes(), ['legacy', 'session_start', 'b']);
+      } finally {
+        unmockApplicationSupport();
+        await support.delete(recursive: true);
+      }
+    });
+
+    test('a backend restart drains the previously written filesystem queue',
+        () async {
+      final support = await mockApplicationSupport();
+      try {
+        final first = defaultBackend();
+        expect(await first.init(configMap()), isTrue);
+        await first.track({'event_type': 'a'});
+        await first.dispose();
+
+        // Wipe preferences entirely: the queue must come from files alone.
+        final prefs = await SharedPreferences.getInstance();
+        for (final key in prefs.getKeys().toList()) {
+          await prefs.remove(key);
+        }
+        requests.clear();
+
+        final second = defaultBackend();
+        expect(await second.init(configMap()), isTrue);
+        await second.flush();
+        expect(uploadedEventTypes(), contains('a'));
+      } finally {
+        unmockApplicationSupport();
+        await support.delete(recursive: true);
+      }
+    });
+
+    test('an unmigratable legacy entry does not refuse init', () async {
+      final support = await mockApplicationSupport();
+      try {
+        final prefs = await SharedPreferences.getInstance();
+        await prefs.setString(
+          'storage-test-key-test/file/v2-0',
+          json.encode({
+            'createdAt': 1000,
+            'content': '{"event_type":"legacy"}',
+          }),
+        );
+        // Block the migration destination with a directory.
+        final safe = base64Url
+            .encode(utf8.encode('storage-test-key-test'))
+            .replaceAll('=', '');
+        final nsDir = Directory('${support.path}/$safe');
+        await nsDir.create(recursive: true);
+        await Directory('${nsDir.path}/v2-0').create();
+
+        final backend = defaultBackend();
+        expect(
+            await backend.init({
+              ...configMap(),
+              'logLevel': 'warn',
+            }),
+            isTrue);
+        expect(logs.join('\n'), contains('migration'));
+        expect(
+          prefs.getString('storage-test-key-test/file/v2-0'),
+          isNotNull,
+          reason: 'a failed migration must leave the source for next launch',
+        );
+      } finally {
+        unmockApplicationSupport();
+        await support.delete(recursive: true);
+      }
     });
 
     test('the flush timer uploads without an explicit flush', () async {

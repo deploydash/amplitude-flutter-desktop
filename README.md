@@ -124,9 +124,16 @@ trips and 30-day discard, session handling on the shared 5-minute gap,
 new features. Only these are actually desktop-specific:
 
 - **Storage:** queue + identity live behind the injectable `DesktopStorage`
-  seam, defaulting to `shared_preferences` namespaced per
-  `storage-<apiKey>-<instanceName>`. Hosts needing real files (Store-aware
-  paths, sandboxed dirs) inject their own implementation.
+  seam. Production Windows/Linux defaults to a crash-safe filesystem queue
+  under the application-support directory, namespaced per
+  `storage-<apiKey>-<instanceName>` (base64url-encoded, so the raw API key
+  never appears in a path): one appendable `.tmp` file plus sealed files,
+  atomic same-directory renames, acknowledged writes, and restart recovery
+  that preserves whole records and ages. A kill loses no acknowledged event.
+  Existing fork installations migrate their legacy preferences queue once,
+  preserving order, content, and age; undecodable entries are quarantined
+  for diagnosis, never silently deleted. Hosts needing a custom location
+  inject their own `DesktopStorage`; tests inject `InMemoryDesktopStorage`.
 - **`reset()` rotates identity, not network state:** clears the user id and
   rotates the device id, while deliberately keeping transport health
   (offline/backoff/429 pause).
