@@ -73,6 +73,23 @@ class FailingStorage extends InMemoryDesktopStorage {
   }
 }
 
+/// Storage that fails only its first append: proves a refused write does not
+/// consume threshold budget.
+class FailOnceStorage extends InMemoryDesktopStorage {
+  FailOnceStorage({required super.clock});
+
+  bool _failed = false;
+
+  @override
+  Future<void> appendEvent(String jsonLine) async {
+    if (!_failed) {
+      _failed = true;
+      throw StateError('disk full once');
+    }
+    return super.appendEvent(jsonLine);
+  }
+}
+
 /// Storage that lists the same unreadable file twice: exercises the flush
 /// loop's `skip` set, which must deduplicate a corrupt listing instead of
 /// quarantining (and logging) the same file twice.
@@ -852,7 +869,7 @@ void main() {
 
     test('transfer enqueues do not auto-flush', () async {
       final backend = await makeBackend(
-        config: configMap(flushQueueSize: 1),
+        config: configMap(flushQueueSize: 3),
       );
       await backend.identify({
         'event_type': r'$identify',
@@ -861,13 +878,158 @@ void main() {
         },
       });
       await backend.track({'event_type': 'clicked'});
-      // One threshold flush for the host event; the transfer itself must
-      // not have triggered a nested chain (which would split the batch).
+      // Deferred threshold: session_start + transfer + trigger append in order
+      // first, then one flush carries all three. A nested flush would split
+      // the batch into two requests.
       expect(requests, hasLength(1));
       expect(
         uploadedEventTypes(),
-        containsAll([r'$identify', 'clicked']),
+        ['session_start', r'$identify', 'clicked'],
       );
+    });
+
+    test('first track counts session_start plus event toward threshold',
+        () async {
+      final backend = await makeBackend(
+        config: configMap(flushQueueSize: 2),
+      );
+      await backend.track({'event_type': 'a'});
+
+      expect(requests, hasLength(1));
+      final payload = decodeUpload(requests.single);
+      expect(
+        (payload['events'] as List).map((e) => (e as Map)['event_type']),
+        ['session_start', 'a'],
+      );
+    });
+
+    test('without session events one track counts as one', () async {
+      final backend = await makeBackend(config: {
+        ...configMap(flushQueueSize: 2),
+        'autocapture': false,
+      });
+      await backend.track({'event_type': 'a'});
+
+      expect(requests, isEmpty,
+          reason: 'single event must not reach threshold 2');
+      await backend.track({'event_type': 'b'});
+      expect(requests, hasLength(1));
+      expect(uploadedEventTypes(), ['a', 'b']);
+    });
+
+    test('held identify session_start participates in threshold', () async {
+      final backend = await makeBackend(
+        config: configMap(flushQueueSize: 1),
+      );
+      await backend.identify({
+        'event_type': r'$identify',
+        'user_properties': {
+          r'$set': {'a': 1}
+        },
+      });
+
+      expect(requests, hasLength(1),
+          reason: 'session_start from held identify must trigger threshold');
+      // Flush-time transfer joins the same upload: threshold counted the
+      // session_start, the flush drained the held batch with it.
+      expect(uploadedEventTypes(), ['session_start', r'$identify']);
+    });
+
+    test('timer-drained identify counts and can trigger flush', () async {
+      BackendManualTimer? timer;
+      final backend = await makeBackend(
+        config: configMap(flushQueueSize: 2),
+        timerOverride: (duration, callback) {
+          timer = BackendManualTimer()..callback = callback;
+          return timer!;
+        },
+      );
+      await backend.identify({
+        'event_type': r'$identify',
+        'user_properties': {
+          r'$set': {'plan': 'pro'}
+        },
+      });
+      // One session_start queued, below threshold: no upload yet.
+      expect(requests, isEmpty);
+
+      timer!.fire();
+      // Timer drain runs through the backend chain; give it a turn.
+      // Threshold 2 (session_start + drained identify) triggers one upload.
+      final deadline = DateTime.now().add(const Duration(seconds: 5));
+      while (requests.isEmpty && DateTime.now().isBefore(deadline)) {
+        await Future<void>.delayed(const Duration(milliseconds: 10));
+      }
+      expect(requests, hasLength(1));
+      expect(uploadedEventTypes(), ['session_start', r'$identify']);
+    });
+
+    test('flush-time transfer joins the current flush without nesting',
+        () async {
+      final backend = await makeBackend();
+      await backend.identify({
+        'event_type': r'$identify',
+        'user_properties': {
+          r'$set': {'a': 1}
+        },
+      });
+      await backend.flush();
+
+      expect(requests, hasLength(1));
+      expect(
+        uploadedEventTypes(),
+        ['session_start', r'$identify'],
+      );
+    });
+
+    test('encoding and storage failures do not advance the count', () async {
+      final backend = await makeBackend(
+        config: configMap(flushQueueSize: 2),
+      );
+      await backend.track({
+        'event_type': 'bad',
+        'nasty': DateTime.utc(2026, 1, 1),
+      });
+      expect(requests, isEmpty);
+
+      await backend.track({'event_type': 'good'});
+      expect(requests, hasLength(1),
+          reason: 'bad event must not have consumed threshold budget');
+      expect(
+        uploadedEventTypes(),
+        ['session_start', 'good'],
+      );
+    });
+
+    test('a refused append does not consume threshold budget', () async {
+      final failing = FailOnceStorage(clock: clock.call);
+      final backend = await makeBackend(
+        config: configMap(flushQueueSize: 2),
+        storageOverride: failing,
+      );
+      // First track: session_start append fails, main event appends (count 1).
+      await backend.track({'event_type': 'a'});
+      expect(requests, isEmpty);
+
+      // Second track: one more append reaches threshold 2 with a single
+      // upload. If the failed append had counted, this would have flushed
+      // early with a split batch.
+      await backend.track({'event_type': 'b'});
+      expect(requests, hasLength(1));
+      expect(uploadedEventTypes(), containsAll(['a', 'b']));
+    });
+
+    test('threshold restarts from zero after a flush', () async {
+      final backend = await makeBackend(
+        config: configMap(flushQueueSize: 2),
+      );
+      await backend.track({'event_type': 'a'});
+      expect(requests, hasLength(1));
+
+      await backend.track({'event_type': 'b'});
+      await backend.track({'event_type': 'c'});
+      expect(requests, hasLength(2));
+      expect(uploadedEventTypes(), ['session_start', 'a', 'b', 'c']);
     });
 
     test('identity reads before init completion never hang', () async {

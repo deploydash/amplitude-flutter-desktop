@@ -196,6 +196,7 @@ class DesktopBackend {
   bool _offline = false;
   int _failures = 0;
   int _pendingCount = 0;
+  bool _isFlushing = false;
   int _throttleUntilMs = 0;
   Timer? _flushTimer;
   Timer? _reprobeTimer;
@@ -234,6 +235,7 @@ class DesktopBackend {
       _offline = false;
       _failures = 0;
       _pendingCount = 0;
+      _isFlushing = false;
       _throttleUntilMs = 0;
 
       _storage = _injectedStorage ??
@@ -289,7 +291,10 @@ class DesktopBackend {
     unawaited(_serial(() async {
       final combined = await _interceptor?.transfer();
       if (combined != null) {
-        await _enqueueRaw(combined, holdable: false);
+        // Timer drains originate outside any flush, so they may trigger the
+        // threshold flush themselves.
+        await _enqueueRaw(combined,
+            holdable: false, allowAutoFlush: true);
       }
     }));
   }
@@ -415,10 +420,14 @@ class DesktopBackend {
 
   // Enqueue path: translate -> identity fill -> session -> identify batching
   // -> enrich -> durable append. `holdable: false` re-enters combined
-  // identifies and timer drains without re-holding.
+  // identifies and timer drains without re-holding. `allowAutoFlush: false`
+  // defers the threshold flush to the outer input so one host call appends
+  // all its events in order before any upload begins; flush-time transfers
+  // also use it to avoid a nested chain.
   Future<void> _enqueueRaw(
     Map<String, dynamic> event, {
     bool holdable = true,
+    bool allowAutoFlush = true,
   }) async {
     final config = _config;
     final identity = _identity;
@@ -463,36 +472,53 @@ class DesktopBackend {
     }
     final main = result.event;
     if (main == null) {
+      // A held main still counts its preceding session events toward the
+      // threshold.
+      await _maybeAutoFlush(allowAutoFlush);
       return;
     }
     if (holdable && interceptor != null) {
       final intercept = await interceptor.process(main);
       // Transfers emit first via `holdable: false` so they gain
       // session/event ids (plan §F, Swift `pipeline.put`); the hold is
-      // never silently dropped.
+      // never silently dropped. They defer their own threshold flush so the
+      // outer input appends everything in order first.
       for (final transfer in intercept.transfers) {
-        await _enqueueRaw(transfer, holdable: false);
+        await _enqueueRaw(transfer,
+            holdable: false, allowAutoFlush: false);
       }
       final toStore = intercept.event;
       if (toStore == null) {
+        await _maybeAutoFlush(allowAutoFlush);
         return;
       }
       await _storeEvent(toStore);
     } else {
       await _storeEvent(main);
     }
-    _pendingCount += 1;
-    // Transfer enqueues never auto-flush: the flush-time transfer runs
-    // inside `_flushChain`, and recursing into a second chain there would
-    // let the outer loop keep uploading after the inner chain trips
-    // offline. Host-event enqueues (holdable) still flush on threshold.
-    if (holdable && _pendingCount >= config.flushQueueSize) {
+    await _maybeAutoFlush(allowAutoFlush);
+  }
+
+  /// Deferred threshold flush: runs once per outer input after all its events
+  /// are appended in order. Never nests inside an already-running flush.
+  Future<void> _maybeAutoFlush(bool allowAutoFlush) async {
+    final config = _config;
+    if (!allowAutoFlush || _isFlushing || config == null) {
+      return;
+    }
+    if (_pendingCount >= config.flushQueueSize) {
       _pendingCount = 0;
       await _flushChain();
     }
   }
 
-  Future<void> _storeEvent(Map<String, dynamic> event) async {
+  /// Appends one enriched event to the durable queue.
+  ///
+  /// WHY bool: `flushQueueSize` counts every successfully appended event
+  /// (session, normal, transferred, timer-drained), not host calls. Only this
+  /// single append boundary knows success, so it owns the count: true means
+  /// appended and counted, false means encoding/storage failure and uncounted.
+  Future<bool> _storeEvent(Map<String, dynamic> event) async {
     // Private: every caller runs after a successful init behind the serial
     // mutex, and init never clears these — so they are non-null by
     // construction. (The old null early-return was unreachable: no public
@@ -525,13 +551,16 @@ class DesktopBackend {
       // Non-encodable values (e.g. a DateTime surviving the channel codec)
       // must drop the event, not reject track().
       _log(1, 'dropping non-encodable event');
-      return;
+      return false;
     }
     try {
       await storage.appendEvent(line);
     } catch (_) {
       _log(1, 'dropping event the queue refused');
+      return false;
     }
+    _pendingCount += 1;
+    return true;
   }
 
   void _fireTerminal(Map<String, dynamic> event, int code, String message) {
@@ -571,23 +600,26 @@ class DesktopBackend {
       _cancelReprobe();
       return;
     }
+    _isFlushing = true;
+    try {
+      await _discardExpired(now);
 
-    await _discardExpired(now);
-
-    // Explicit flush transfers held identifies first.
-    final combined = await _interceptor?.transfer();
-    if (combined != null) {
-      await _enqueueRaw(combined, holdable: false);
-      // Transfer enqueues never recurse into a nested chain (see
-      // `_enqueueRaw`), but re-check transport state anyway before
-      // touching the network: an offline probe that just drained a held
-      // identify must not upload on that cycle.
-      if (_offline || _clock() < _throttleUntilMs) {
-        return;
+      // Explicit flush transfers held identifies first. It increments the
+      // queue count but joins this flush instead of starting a nested one
+      // (the in-flush guard in `_maybeAutoFlush` stands it down).
+      final combined = await _interceptor?.transfer();
+      if (combined != null) {
+        await _enqueueRaw(combined,
+            holdable: false, allowAutoFlush: true);
+        // Re-check transport state before touching the network: an offline
+        // probe that just drained a held identify must not upload on that
+        // cycle.
+        if (_offline || _clock() < _throttleUntilMs) {
+          return;
+        }
       }
-    }
-    await storage.sealCurrentFile();
-    _pendingCount = 0;
+      await storage.sealCurrentFile();
+      _pendingCount = 0;
 
     var files = await storage.listFilesOldestFirst();
     final skip = <String>{};
@@ -706,6 +738,9 @@ class DesktopBackend {
       if (singleAttempt) {
         return;
       }
+    }
+    } finally {
+      _isFlushing = false;
     }
   }
 
