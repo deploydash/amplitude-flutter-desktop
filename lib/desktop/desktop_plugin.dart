@@ -1,7 +1,7 @@
 import 'dart:async';
 
-import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
+import 'package:flutter/widgets.dart';
 
 import '../constants.dart';
 import 'desktop_backend.dart';
@@ -26,11 +26,96 @@ import 'desktop_backend.dart';
 /// with in-memory storage and a scripted HTTP client.
 typedef DesktopBackendFactory = DesktopBackend Function();
 
+/// Source of Flutter lifecycle states for one plugin.
+///
+/// WHY an interface: production observes `WidgetsBinding` (no Cocoa code,
+/// no caller API), while tests inject a fake that fires states with explicit
+/// timestamps. The plugin translates states to backend
+/// enter/exit calls; backends serialize the calls through their own chains.
+abstract class DesktopLifecycleSource {
+  /// Current state at attach time (drives init-while-hidden).
+  AppLifecycleState get currentState;
+
+  /// Begins observations, invoking [onState] with the state and epoch millis
+  /// for every transition.
+  void start(void Function(AppLifecycleState state, int timestampMs) onState);
+
+  /// Ends observations. Idempotent.
+  void stop();
+}
+
+/// Production [DesktopLifecycleSource] via `WidgetsBindingObserver`.
+///
+/// WHY `WidgetsBindingObserver` and not a window-manager plugin: the 14-method
+/// channel contract is frozen, and no extra native toolchain is required on
+/// Linux/Windows. Desktop `inactive` (visible but unfocused, e.g. alt-tab)
+/// is deliberately not a session boundary.
+class WidgetsBindingLifecycleSource
+    with WidgetsBindingObserver
+    implements DesktopLifecycleSource {
+  WidgetsBindingLifecycleSource({int Function()? clock})
+      : _clock = clock ?? _wallClock;
+
+  static int _wallClock() => DateTime.now().millisecondsSinceEpoch;
+
+  final int Function() _clock;
+  void Function(AppLifecycleState state, int timestampMs)? _onState;
+
+  @override
+  AppLifecycleState get currentState =>
+      WidgetsBinding.instance.lifecycleState ?? AppLifecycleState.resumed;
+
+  @override
+  void start(void Function(AppLifecycleState state, int timestampMs) onState) {
+    _onState = onState;
+    WidgetsBinding.instance.addObserver(this);
+  }
+
+  @override
+  void stop() {
+    WidgetsBinding.instance.removeObserver(this);
+    _onState = null;
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    _onState?.call(state, _clock());
+  }
+}
+
 class DesktopAmplitudePlugin {
-  DesktopAmplitudePlugin({DesktopBackendFactory? backendFactory})
-      : _backendFactory = backendFactory ?? DesktopBackend.new;
+  DesktopAmplitudePlugin({
+    DesktopBackendFactory? backendFactory,
+    DesktopLifecycleSource? lifecycleSource,
+  })  : _backendFactory = backendFactory ?? DesktopBackend.new,
+        _lifecycleSource = lifecycleSource {
+    final source = _lifecycleSource;
+    if (source != null) {
+      _isForeground = _isForegroundState(source.currentState);
+      source.start((state, timestampMs) {
+        unawaited(handleLifecycleForTests(state, timestampMs));
+      });
+    }
+  }
 
   final DesktopBackendFactory _backendFactory;
+  final DesktopLifecycleSource? _lifecycleSource;
+
+  /// True while the app is visible/foreground. `inactive` never changes it.
+  bool _isForeground = true;
+
+  /// Set on `detached`: further states are ignored and observations stop.
+  bool _detached = false;
+
+  static bool _isForegroundState(AppLifecycleState state) {
+    return switch (state) {
+      AppLifecycleState.resumed || AppLifecycleState.inactive => true,
+      AppLifecycleState.hidden ||
+      AppLifecycleState.paused ||
+      AppLifecycleState.detached =>
+        false,
+    };
+  }
 
   /// Backends by `instanceName`. Visible for tests.
   final Map<String, DesktopBackend> instances = {};
@@ -60,15 +145,71 @@ class DesktopAmplitudePlugin {
     final previous = _activePlugin;
     final next = DesktopAmplitudePlugin(
       backendFactory: debugBackendFactory,
+      lifecycleSource: WidgetsBindingLifecycleSource(),
     );
     _activePlugin = next;
     const MethodChannel('amplitude_flutter')
         .setMethodCallHandler(next.handleMethodCall);
     if (previous != null) {
-      for (final backend in previous.instances.values) {
-        unawaited(backend.dispose());
-      }
-      previous.instances.clear();
+      unawaited(previous.dispose());
+    }
+  }
+
+  /// Releases observations and backends. Idempotent: safe to call twice and
+  /// safe to call on a plugin that never initialized a backend. The on-disk
+  /// queue is the delivery guarantee; lifecycle exit flushes are best-effort.
+  Future<void> dispose() async {
+    _detached = true;
+    _lifecycleSource?.stop();
+    for (final backend in instances.values) {
+      await backend.dispose();
+    }
+    instances.clear();
+    if (identical(_activePlugin, this)) {
+      _activePlugin = null;
+    }
+  }
+
+  /// Test hook driving the same path as the lifecycle source, with an
+  /// explicit timestamp. Production never calls this; the source does.
+  @visibleForTesting
+  Future<void> handleLifecycleForTests(
+    AppLifecycleState state,
+    int timestampMs,
+  ) async {
+    if (_detached) {
+      return;
+    }
+    switch (state) {
+      case AppLifecycleState.resumed:
+        if (_isForeground) {
+          return;
+        }
+        _isForeground = true;
+        for (final backend in instances.values) {
+          await backend.onEnterForeground(timestampMs);
+        }
+      case AppLifecycleState.hidden:
+      case AppLifecycleState.paused:
+        if (!_isForeground) {
+          return;
+        }
+        _isForeground = false;
+        for (final backend in instances.values) {
+          await backend.onExitForeground(timestampMs);
+        }
+      case AppLifecycleState.inactive:
+        // Visible but unfocused (alt-tab): never a session boundary.
+        return;
+      case AppLifecycleState.detached:
+        // Best-effort exit/flush once, then stop observations. The SDK never
+        // decides whether the app may exit; the host owns that.
+        _isForeground = false;
+        _detached = true;
+        for (final backend in instances.values) {
+          await backend.onExitForeground(timestampMs);
+        }
+        _lifecycleSource?.stop();
     }
   }
 
@@ -95,6 +236,11 @@ class DesktopAmplitudePlugin {
         await previous.dispose();
       }
       instances[key] = backend;
+      // Init-while-hidden: the first event must process as background so a
+      // restored session rotates on the next real resume past the gap.
+      if (!_isForeground) {
+        backend.setForeground(false);
+      }
       return null;
     }
 

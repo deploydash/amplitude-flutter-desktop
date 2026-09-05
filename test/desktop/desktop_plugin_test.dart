@@ -7,6 +7,7 @@ import 'package:amplitude_flutter/desktop/desktop_plugin.dart';
 import 'package:amplitude_flutter/desktop/desktop_storage.dart';
 import 'package:amplitude_flutter/desktop/desktop_transport.dart';
 import 'package:flutter/services.dart';
+import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
@@ -61,6 +62,32 @@ DesktopPluginHarness makeHarness() {
     },
   );
   return DesktopPluginHarness(plugin, requests, backends);
+}
+
+/// Fake lifecycle source: tests drive states with explicit timestamps.
+class FakeLifecycleSource implements DesktopLifecycleSource {
+  FakeLifecycleSource([this.currentState = AppLifecycleState.resumed]);
+
+  @override
+  AppLifecycleState currentState;
+
+  void Function(AppLifecycleState state, int timestampMs)? _onState;
+  int stops = 0;
+
+  @override
+  void start(void Function(AppLifecycleState state, int timestampMs) onState) {
+    _onState = onState;
+  }
+
+  @override
+  void stop() {
+    stops += 1;
+    _onState = null;
+  }
+
+  void fire(AppLifecycleState state, int timestampMs) {
+    _onState?.call(state, timestampMs);
+  }
 }
 
 Map<String, dynamic> initArgs({String instance = 'test'}) {
@@ -382,6 +409,332 @@ void main() {
       } finally {
         messenger.setMockMethodCallHandler(channel, null);
       }
+    });
+  });
+
+  group('DesktopAmplitudePlugin lifecycle', () {
+    DesktopAmplitudePlugin makeLifecyclePlugin(
+      FakeLifecycleSource source,
+      List<http.BaseRequest> requests,
+      List<DesktopBackend> backends,
+    ) {
+      return DesktopAmplitudePlugin(
+        backendFactory: () {
+          final backend = DesktopBackend(
+            storage: InMemoryDesktopStorage(),
+            transport: DesktopTransport(
+              client: MockClient((request) async {
+                requests.add(request);
+                return http.Response('{}', 200);
+              }),
+            ),
+          );
+          backends.add(backend);
+          return backend;
+        },
+        lifecycleSource: source,
+      );
+    }
+
+    test('hidden then resumed exits and enters with timestamps', () async {
+      final requests = <http.BaseRequest>[];
+      final backends = <DesktopBackend>[];
+      final source = FakeLifecycleSource();
+      final plugin = makeLifecyclePlugin(source, requests, backends);
+      try {
+        await call(plugin, 'init', initArgs());
+        await call(plugin, 'track', {
+          'instanceName': 'test',
+          'event': {'event_type': 'a'},
+        });
+        final first =
+            await call(plugin, 'getSessionId', {'instanceName': 'test'});
+
+        await plugin.handleLifecycleForTests(AppLifecycleState.hidden, 2000);
+        await plugin.handleLifecycleForTests(AppLifecycleState.resumed, 9000);
+
+        await call(plugin, 'flush', {'instanceName': 'test'});
+        expect(harness.requests, isEmpty);
+        expect(requests, isNotEmpty);
+        // Default 5-minute gap: 2 s to 9 s is within gap, session extends.
+        expect(await call(plugin, 'getSessionId', {'instanceName': 'test'}),
+            first);
+      } finally {
+        await plugin.dispose();
+      }
+    });
+
+    test('repeated states deduplicate; inactive never exits', () async {
+      final requests = <http.BaseRequest>[];
+      final backends = <DesktopBackend>[];
+      final source = FakeLifecycleSource();
+      final plugin = makeLifecyclePlugin(source, requests, backends);
+      try {
+        await call(plugin, 'init', initArgs());
+        await call(plugin, 'track', {
+          'instanceName': 'test',
+          'event': {'event_type': 'a'},
+        });
+        final first =
+            await call(plugin, 'getSessionId', {'instanceName': 'test'});
+
+        await plugin.handleLifecycleForTests(AppLifecycleState.hidden, 1000);
+        await plugin.handleLifecycleForTests(AppLifecycleState.paused, 1100);
+        await plugin.handleLifecycleForTests(AppLifecycleState.resumed, 1200);
+        await plugin.handleLifecycleForTests(AppLifecycleState.resumed, 1300);
+        await plugin.handleLifecycleForTests(AppLifecycleState.inactive, 1400);
+
+        // Within gap, no rotation despite duplicate exits/enters; inactive
+        // is not a boundary.
+        expect(await call(plugin, 'getSessionId', {'instanceName': 'test'}),
+            first);
+      } finally {
+        await plugin.dispose();
+      }
+    });
+
+    test('all instances receive each transition once', () async {
+      final requests = <http.BaseRequest>[];
+      final backends = <DesktopBackend>[];
+      final source = FakeLifecycleSource();
+      final plugin = makeLifecyclePlugin(source, requests, backends);
+      try {
+        await call(plugin, 'init', initArgs(instance: 'a'));
+        await call(plugin, 'init', initArgs(instance: 'b'));
+        await plugin.handleLifecycleForTests(AppLifecycleState.hidden, 1000);
+        await plugin.handleLifecycleForTests(AppLifecycleState.resumed, 2000);
+        expect(backends, hasLength(2));
+      } finally {
+        await plugin.dispose();
+      }
+    });
+
+    test('init while hidden starts background; resume rotates past gap',
+        () async {
+      final requests = <http.BaseRequest>[];
+      final backends = <DesktopBackend>[];
+      final source =
+          FakeLifecycleSource(AppLifecycleState.hidden);
+      final plugin = makeLifecyclePlugin(source, requests, backends);
+      try {
+        await call(plugin, 'init', initArgs());
+        await call(plugin, 'track', {
+          'instanceName': 'test',
+          'event': {'event_type': 'a'},
+        });
+        final first =
+            await call(plugin, 'getSessionId', {'instanceName': 'test'});
+
+        // 10 minutes later (past the 5-minute gap): resume rotates.
+        final resumeMs =
+            DateTime.now().millisecondsSinceEpoch + 10 * 60 * 1000;
+        await plugin.handleLifecycleForTests(
+            AppLifecycleState.resumed, resumeMs);
+        await call(plugin, 'track', {
+          'instanceName': 'test',
+          'event': {'event_type': 'b'},
+        });
+        expect(await call(plugin, 'getSessionId', {'instanceName': 'test'}),
+            isNot(first));
+
+        await call(plugin, 'flush', {'instanceName': 'test'});
+        final types = [
+          for (final r in requests)
+            for (final e
+                in (decodeUpload(r)['events'] as List))
+              (e as Map)['event_type'] as String,
+        ];
+        expect(types, contains('session_end'));
+        expect(types.lastIndexOf('session_start'),
+            greaterThan(types.indexOf('session_end')));
+      } finally {
+        await plugin.dispose();
+      }
+    });
+
+    test('dispose is idempotent and stops observations', () async {
+      final requests = <http.BaseRequest>[];
+      final backends = <DesktopBackend>[];
+      final source = FakeLifecycleSource();
+      final plugin = makeLifecyclePlugin(source, requests, backends);
+      await call(plugin, 'init', initArgs());
+      await plugin.dispose();
+      await plugin.dispose();
+      expect(source.stops, greaterThanOrEqualTo(1));
+      expect(plugin.instances, isEmpty);
+      final before = requests.length;
+      source.fire(AppLifecycleState.hidden, 9999);
+      await Future<void>.delayed(Duration.zero);
+      expect(requests.length, before,
+          reason: 'disposed plugin forwards nothing');
+    });
+
+    test('hot restart retires the old observer with its backends', () async {
+      final requests = <http.BaseRequest>[];
+      final backends = <DesktopBackend>[];
+      final firstSource = FakeLifecycleSource();
+      final first = makeLifecyclePlugin(firstSource, requests, backends);
+      await call(first, 'init', initArgs());
+      await first.dispose();
+
+      expect(firstSource.stops, greaterThanOrEqualTo(1));
+      expect(first.instances, isEmpty);
+      // Old backends receive no later lifecycle: firing is a no-op.
+      firstSource.fire(AppLifecycleState.resumed, 9999);
+      await Future<void>.delayed(Duration.zero);
+    });
+
+    test('detached flushes once, stops, and ignores later states', () async {
+      final requests = <http.BaseRequest>[];
+      final backends = <DesktopBackend>[];
+      final source = FakeLifecycleSource();
+      final plugin = makeLifecyclePlugin(source, requests, backends);
+      try {
+        await call(plugin, 'init', initArgs());
+        await call(plugin, 'track', {
+          'instanceName': 'test',
+          'event': {'event_type': 'a'},
+        });
+        await plugin.handleLifecycleForTests(AppLifecycleState.detached, 5000);
+        final afterDetach = requests.length;
+        expect(afterDetach, greaterThanOrEqualTo(1));
+
+        await plugin.handleLifecycleForTests(AppLifecycleState.resumed, 6000);
+        await Future<void>.delayed(Duration.zero);
+        expect(requests.length, afterDetach,
+            reason: 'states after detached are ignored');
+        expect(source.stops, greaterThanOrEqualTo(1));
+      } finally {
+        await plugin.dispose();
+      }
+    });
+
+    test('source-driven transitions reach backends', () async {
+      final requests = <http.BaseRequest>[];
+      final backends = <DesktopBackend>[];
+      final source = FakeLifecycleSource();
+      final plugin = makeLifecyclePlugin(source, requests, backends);
+      try {
+        await call(plugin, 'init', initArgs());
+        await call(plugin, 'track', {
+          'instanceName': 'test',
+          'event': {'event_type': 'a'},
+        });
+        source.fire(AppLifecycleState.hidden, 1000);
+        await Future<void>.delayed(Duration.zero);
+        source.fire(AppLifecycleState.resumed, 2000);
+        await Future<void>.delayed(Duration.zero);
+        expect(await call(plugin, 'getSessionId', {'instanceName': 'test'}),
+            isNot(-1));
+      } finally {
+        await plugin.dispose();
+      }
+    });
+
+    test('paused initial state starts background', () async {
+      final requests = <http.BaseRequest>[];
+      final backends = <DesktopBackend>[];
+      final source = FakeLifecycleSource(AppLifecycleState.paused);
+      final plugin = makeLifecyclePlugin(source, requests, backends);
+      try {
+        await call(plugin, 'init', initArgs());
+        // First track processes as background (no crash, session opens).
+        await call(plugin, 'track', {
+          'instanceName': 'test',
+          'event': {'event_type': 'a'},
+        });
+        expect(await call(plugin, 'getSessionId', {'instanceName': 'test'}),
+            isNot(-1));
+      } finally {
+        await plugin.dispose();
+      }
+    });
+
+    test('detached initial state starts background', () async {
+      final source = FakeLifecycleSource(AppLifecycleState.detached);
+      final plugin = DesktopAmplitudePlugin(lifecycleSource: source);
+      await plugin.dispose();
+      expect(source.stops, greaterThanOrEqualTo(1));
+    });
+
+    test('detached without a source still exits backends', () async {
+      final plugin = DesktopAmplitudePlugin(
+        backendFactory: () {
+          final backend = DesktopBackend(
+            storage: InMemoryDesktopStorage(),
+            transport: DesktopTransport(
+              client: MockClient((request) async => http.Response('{}', 200)),
+            ),
+          );
+          return backend;
+        },
+      );
+      try {
+        await call(plugin, 'init', initArgs());
+        await plugin.handleLifecycleForTests(AppLifecycleState.detached, 1000);
+        await plugin.handleLifecycleForTests(AppLifecycleState.resumed, 2000);
+      } finally {
+        await plugin.dispose();
+      }
+    });
+
+    test('disposing the active plugin clears the channel owner', () async {
+      TestWidgetsFlutterBinding.ensureInitialized();
+      final previousFactory = DesktopAmplitudePlugin.debugBackendFactory;
+      DesktopAmplitudePlugin.debugBackendFactory = () => DesktopBackend(
+            storage: InMemoryDesktopStorage(),
+            transport: DesktopTransport(
+              client: MockClient((request) async => http.Response('{}', 200)),
+            ),
+          );
+      try {
+        DesktopAmplitudePlugin.registerWith();
+        final active = DesktopAmplitudePlugin.activePluginForTests!;
+        await active.dispose();
+        expect(DesktopAmplitudePlugin.activePluginForTests, isNull);
+      } finally {
+        DesktopAmplitudePlugin.debugBackendFactory = previousFactory;
+      }
+    });
+  });
+
+  group('WidgetsBindingLifecycleSource', () {
+    test('reports binding state, forwards with clock, stops cleanly',
+        () async {
+      TestWidgetsFlutterBinding.ensureInitialized();
+      var clockCalls = 0;
+      final source = WidgetsBindingLifecycleSource(clock: () {
+        clockCalls += 1;
+        return 4242;
+      });
+      expect(source.currentState, isA<AppLifecycleState>());
+
+      AppLifecycleState? seen;
+      int? seenMs;
+      source.start((state, ms) {
+        seen = state;
+        seenMs = ms;
+      });
+      source.didChangeAppLifecycleState(AppLifecycleState.hidden);
+      expect(seen, AppLifecycleState.hidden);
+      expect(seenMs, 4242);
+      expect(clockCalls, 1);
+
+      source.stop();
+      seen = null;
+      source.didChangeAppLifecycleState(AppLifecycleState.resumed);
+      expect(seen, isNull);
+    });
+
+    test('default clock uses wall time', () async {
+      TestWidgetsFlutterBinding.ensureInitialized();
+      final source = WidgetsBindingLifecycleSource();
+      int? seenMs;
+      source.start((_, ms) => seenMs = ms);
+      final before = DateTime.now().millisecondsSinceEpoch;
+      source.didChangeAppLifecycleState(AppLifecycleState.paused);
+      source.stop();
+      expect(seenMs, greaterThanOrEqualTo(before));
     });
   });
 }

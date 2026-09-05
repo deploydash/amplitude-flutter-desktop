@@ -113,9 +113,9 @@ Windows are served by the pure-Dart backend (no extra native toolchain).
 Linux and Windows are served by a pure-Dart backend under `lib/desktop/`
 (`DesktopAmplitudePlugin`, registered via `dartPluginClass`); macOS keeps
 using the shared Darwin backend. The public `Amplitude` API is unchanged —
-the same 14 channel methods work on desktop with no caller changes — but
-desktop hosts own two lifecycle jobs (foreground signals, flush on close);
-see Host responsibilities below.
+the same 14 channel methods work on desktop with no caller changes —
+lifecycle signals flow automatically through the plugin, while hosts own
+flush on close; see Host responsibilities below.
 
 Unless noted below, behavior matches the Swift/Kotlin SDKs: upload
 batching and tuning, the 400/413/429 retry dispatch with silent offline
@@ -144,10 +144,10 @@ new features. Only these are actually desktop-specific:
 
 ### Host responsibilities
 
-The pure-Dart backend cannot see OS lifecycle notifications and does not
-own your windows, so two jobs stay in the host app. (macOS gets both free
-from AmplitudeSwift's `MacOSLifecycleMonitor`; Linux/Windows have no native
-SDK to provide them.)
+The pure-Dart backend does not own your windows, so one job stays in the
+host app. (macOS gets both lifecycle and close handling free from
+AmplitudeSwift's `MacOSLifecycleMonitor`; Linux/Windows have no native SDK
+to provide them.)
 
 - **Flush on close.** Call `flush()` when the app is asked to exit. The
   framework hook is
@@ -174,10 +174,13 @@ SDK to provide them.)
   this as best-effort: kills and task-manager terminates deliver no
   notification, so the on-disk queue — not the close hook — is the delivery
   guarantee.
-- **Foreground signals.** These apply when you embed `DesktopBackend`
-  directly; through the channel API the backend stays at its foreground
-  default, so sessions extend across focus loss. Direct embedders map host
-  observations onto the backend (timestamps are millis since epoch):
+- **Foreground signals are automatic through the channel API.** The desktop
+  plugin observes Flutter lifecycle states and forwards them to every
+  initialized backend: `resumed` enters foreground, `hidden`/`paused` exits,
+  `detached` flushes best-effort and stops, and `inactive` (alt-tab focus
+  loss) never ends a session. Direct `DesktopBackend` embedders still map
+  host observations onto the backend manually (timestamps are millis since
+  epoch):
 
   | Your app | Tell the backend |
   | --- | --- |
