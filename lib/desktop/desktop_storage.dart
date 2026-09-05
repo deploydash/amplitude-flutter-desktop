@@ -48,7 +48,7 @@ abstract class DesktopStorage {
   Future<void> deleteKey(String key);
 
   /// Appends one JSON-encoded event to the open file, sealing early past
-  /// 975 KB (plan §B.2).
+  /// 975,000 bytes (plan §B.2).
   Future<void> appendEvent(String jsonLine);
 
   /// Seals the open file for upload. Returns the sealed name, or null when

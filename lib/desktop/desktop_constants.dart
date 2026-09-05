@@ -27,8 +27,9 @@ class DesktopQueueFiles {
   /// Hidden quarantine dir for unreadable files (Swift `QUARANTINE_DIR_NAME`).
   static const quarantinePrefix = '.quarantine/';
 
-  /// Seal the open file early once it grows past this (Swift `MAX_FILE_SIZE`).
-  static const maxFileSizeBytes = 975 * 1024;
+  /// Seal the open file early once it grows past this many UTF-8 bytes
+  /// (Swift `MAX_FILE_SIZE`, exactly 975,000 — not 975 KiB).
+  static const maxFileSizeBytes = 975000;
 
   /// Events are stored as JSON lines separated by this (Swift `DELMITER`).
   static const delimiter = '\u0000';
