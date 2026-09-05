@@ -75,19 +75,25 @@ class DeviceInfoDesktopSystemInfo implements DesktopSystemInfoSource {
             platform: 'Linux',
             osName: 'linux',
             osVersion: info.versionId ?? info.version ?? info.prettyName,
-            deviceModel: info.name,
+            // `device_info_plus` exposes /etc/os-release (distro), not
+            // hardware: never report it as device model.
+            deviceModel: null,
             deviceManufacturer: null,
           );
         case TargetPlatform.windows:
           final info = await _plugin.windowsInfo;
+          // `productName` is an OS edition (e.g. Windows 11 Pro), not
+          // hardware: fold it into the OS version string and leave the
+          // hardware model unset. Never substitute computer/user/machine IDs.
           final display = info.displayVersion.isNotEmpty
-              ? '${info.displayVersion} (${info.buildNumber})'
-              : '${info.buildNumber}';
+              ? '${info.productName} ${info.displayVersion} '
+                  '(${info.buildNumber})'
+              : '${info.productName} (${info.buildNumber})';
           return DesktopOsInfo(
             platform: 'Windows',
             osName: 'windows',
             osVersion: display,
-            deviceModel: info.productName,
+            deviceModel: null,
             deviceManufacturer: null,
           );
         case TargetPlatform.macOS:

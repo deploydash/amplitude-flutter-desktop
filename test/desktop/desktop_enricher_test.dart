@@ -135,8 +135,38 @@ void main() {
       expect(out['language'], 'en-US');
       // Absent SDK values leave the key absent rather than sending null.
       expect(out.containsKey('device_manufacturer'), isFalse);
-      // Never set client-side.
-      expect(out.containsKey('ip'), isFalse);
+      // Default IP tracking supplies the server-lookup sentinel.
+      expect(out['ip'], r'$remote');
+    });
+
+    test('default enrichment supplies \$remote for server IP lookup', () {
+      final out = enrich({'event_type': 'x'});
+      expect(out['ip'], r'$remote');
+    });
+
+    test('explicit IP wins when tracking is enabled', () {
+      final out = enrich({'event_type': 'x', 'ip': '1.2.3.4'});
+      expect(out['ip'], '1.2.3.4');
+    });
+
+    test('disabled IP tracking removes explicit and default IP', () {
+      expect(
+          enrich({'event_type': 'x', 'ip': '1.2.3.4'},
+              tracking: const {'ipAddress': false}).containsKey('ip'),
+          isFalse);
+      expect(
+          enrich({'event_type': 'x'},
+              tracking: const {'ipAddress': false}).containsKey('ip'),
+          isFalse);
+    });
+
+    test('coppa removes explicit and default IP', () {
+      expect(
+          enrich({'event_type': 'x', 'ip': '1.2.3.4'}, coppa: true)
+              .containsKey('ip'),
+          isFalse);
+      expect(
+          enrich({'event_type': 'x'}, coppa: true).containsKey('ip'), isFalse);
     });
 
     test('host values survive when the SDK has nothing to stamp', () {

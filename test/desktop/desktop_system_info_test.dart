@@ -132,7 +132,8 @@ void main() {
       expect(os.platform, 'Linux');
       expect(os.osName, 'linux');
       expect(os.osVersion, '24.04');
-      expect(os.deviceModel, 'Ubuntu');
+      expect(os.deviceModel, isNull,
+          reason: 'distro name is OS fact, not hardware model');
       expect(os.deviceManufacturer, isNull);
     });
 
@@ -160,8 +161,11 @@ void main() {
 
       expect(os.platform, 'Windows');
       expect(os.osName, 'windows');
-      expect(os.osVersion, '22H2 (22621)');
-      expect(os.deviceModel, 'Windows 11 Pro');
+      expect(os.osVersion, contains('Windows 11 Pro'));
+      expect(os.osVersion, contains('22H2'));
+      expect(os.osVersion, contains('22621'));
+      expect(os.deviceModel, isNull,
+          reason: 'Windows edition is OS fact, not hardware model');
       expect(os.deviceManufacturer, isNull);
     });
 
@@ -171,7 +175,9 @@ void main() {
         platformOverride: TargetPlatform.windows,
       ).currentOs();
 
-      expect(os.osVersion, '22621');
+      expect(os.osVersion, contains('Windows 11 Pro'));
+      expect(os.osVersion, contains('22621'));
+      expect(os.deviceModel, isNull);
     });
 
     test('macOS maps release, model, and Apple manufacturer', () async {

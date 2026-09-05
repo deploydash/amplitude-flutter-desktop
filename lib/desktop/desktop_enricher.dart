@@ -157,10 +157,14 @@ Map<String, dynamic> enrichDesktopEvent({
   stamp('app_version', 'versionName', configAppVersion ?? app.appVersion);
   stamp('version_name', 'versionName', app.versionName);
 
-  // `ip` is never set client-side; an explicit host value survives unless
-  // its flag is off or COPPA applies.
+  // IP: an explicit host value survives when tracking is on and COPPA is
+  // off; otherwise it is removed (desktop privacy policy). With tracking on
+  // and no explicit IP, set the `$remote` sentinel so Amplitude derives
+  // IP/geolocation server-side (Swift `ContextPlugin` parity).
   if (!tracked('ipAddress') || coppa) {
     out.remove('ip');
+  } else {
+    out['ip'] ??= r'$remote';
   }
 
   // Location ids: never auto-collected on desktop. Explicit host values
