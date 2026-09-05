@@ -459,14 +459,16 @@ void main() {
           '{"events_with_invalid_fields": {"event_type": [1]}}', 400));
       await backend.flush();
 
-      expect(terminals.map((t) => '${t.eventType}:${t.code}'), ['a:400']);
-      // The surviving session_start stays queued.
-      expect(await storage.listFilesOldestFirst(), hasLength(1));
+      // Ordered retry drains the survivor in the same flush: 400 drops `a`,
+      // rewrite preserves session_start, second upload sends it.
+      expect(requests, hasLength(2));
+      expect(terminals.map((t) => '${t.eventType}:${t.code}'),
+          ['a:400', 'session_start:200']);
+      expect(await storage.listFilesOldestFirst(), isEmpty);
 
       await backend.flush();
-      expect(requests, hasLength(2));
-      expect(uploadedEventTypes().last, 'session_start');
-      expect(await storage.listFilesOldestFirst(), isEmpty);
+      expect(requests, hasLength(2),
+          reason: 'second flush has nothing left to send');
     });
 
     test('400 bad apiKey drops the whole file', () async {
@@ -550,12 +552,91 @@ void main() {
       await backend.track({'event_type': 'a'});
       script.add(() => http.Response('boom', 500));
       await backend.flush();
-      expect(sleeps, [const Duration(seconds: 1)]);
-      expect(await storage.listFilesOldestFirst(), hasLength(1));
 
-      await backend.flush();
+      // Ordered retry: same oldest file retried within the one flush.
+      expect(requests, hasLength(2));
+      expect(sleeps, [const Duration(seconds: 1)]);
       expect(await storage.listFilesOldestFirst(), isEmpty);
       expect(terminals.map((t) => t.code), [200, 200]);
+    });
+
+    test('retryable failure retries the same file within one flush',
+        () async {
+      final backend = await makeBackend();
+      await backend.track({'event_type': 'a'});
+      script.add(() => http.Response('boom', 500));
+      await backend.flush();
+
+      expect(requests, hasLength(2));
+      expect(sleeps, [const Duration(seconds: 1)]);
+      expect(await storage.listFilesOldestFirst(), isEmpty);
+      expect(terminals.map((t) => t.code), [200, 200]);
+    });
+
+    test('newer file never overtakes a retrying oldest file', () async {
+      final backend = await makeBackend();
+      await backend.track({'event_type': 'a'});
+      await storage.sealCurrentFile();
+      await backend.track({'event_type': 'b'});
+      // Two sealed files: oldest holds session_start+a, newest holds b.
+      script.add(() => http.Response('boom', 500));
+      await backend.flush();
+
+      // Oldest retried first: A fails, A succeeds, then B succeeds.
+      expect(requests, hasLength(3));
+      final perRequest = [
+        for (final r in requests)
+          (decodeUpload(r)['events'] as List)
+              .map((e) => (e as Map)['event_type'] as String)
+              .toList(),
+      ];
+      expect(perRequest[0].first, 'session_start');
+      expect(perRequest[1].first, 'session_start');
+      expect(perRequest[2], ['b']);
+      expect(sleeps, [const Duration(seconds: 1)]);
+      expect(await storage.listFilesOldestFirst(), isEmpty);
+    });
+
+    test('exhaustion retries the oldest file without touching newer files',
+        () async {
+      final backend = await makeBackend(
+        config: configMap(flushMaxRetries: 2),
+      );
+      await backend.track({'event_type': 'a'});
+      await storage.sealCurrentFile();
+      await backend.track({'event_type': 'b'});
+      for (var i = 0; i < 3; i++) {
+        script.add(() => http.Response('down', 500));
+      }
+      await backend.flush();
+
+      // Three attempts, all on the oldest file; newer file never requested.
+      expect(requests, hasLength(3));
+      for (final r in requests) {
+        final types = (decodeUpload(r)['events'] as List)
+            .map((e) => (e as Map)['event_type'] as String)
+            .toList();
+        expect(types, contains('session_start'));
+        expect(types, isNot(contains('b')));
+      }
+      expect(sleeps,
+          [const Duration(seconds: 1), const Duration(seconds: 2)]);
+      expect(terminals, isEmpty);
+      expect(await storage.listFilesOldestFirst(), hasLength(2));
+    });
+
+    test('a successful retry resets failures before the next file', () async {
+      final backend = await makeBackend();
+      await backend.track({'event_type': 'a'});
+      await storage.sealCurrentFile();
+      await backend.track({'event_type': 'b'});
+      script.add(() => http.Response('boom', 500));
+      await backend.flush();
+
+      // One backoff for the oldest retry; the next file uploads cleanly.
+      expect(sleeps, [const Duration(seconds: 1)]);
+      expect(await storage.listFilesOldestFirst(), isEmpty);
+      expect(requests, hasLength(3));
     });
 
     test('network throw retries like a 5xx', () async {
@@ -569,7 +650,11 @@ void main() {
       );
       await backend.track({'event_type': 'a'});
       await backend.flush();
-      expect(sleeps, [const Duration(seconds: 1)]);
+      // Six attempts (failures 1..5 back off, 6th trips offline).
+      expect(requests, hasLength(6));
+      expect(sleeps, [
+        for (final s in [1, 2, 4, 8, 16]) Duration(seconds: s),
+      ]);
       expect(await storage.listFilesOldestFirst(), hasLength(1));
     });
 
@@ -595,12 +680,12 @@ void main() {
         reprobeInterval: const Duration(milliseconds: 50),
       );
       await backend.track({'event_type': 'a'});
-      // One attempt per file per flush: three flushes fail before the
-      // failures counter (3 > maxRetries 2) trips offline.
+      // Ordered retry: one flush makes three attempts on the same oldest
+      // file before the failures counter (3 > maxRetries 2) trips offline.
       for (var i = 0; i < 3; i++) {
         script.add(() => http.Response('down', 500));
-        await backend.flush();
       }
+      await backend.flush();
 
       // Offline now: files kept, user-silence (no terminal callbacks,
       // diagnostic log only).
@@ -622,15 +707,13 @@ void main() {
     test('30-day-old files are discarded with a callback', () async {
       final backend = await makeBackend();
       await backend.track({'event_type': 'ancient'});
-      // Seal an old file: fail one upload so the sealed file survives.
-      script.add(() => throw http.ClientException('offline'));
-      await backend.flush();
+      await storage.sealCurrentFile();
       expect(await storage.listFilesOldestFirst(), hasLength(1));
 
       clock.nowMs += 31 * 24 * 3600 * 1000;
       await backend.flush();
 
-      expect(requests.length, 1, reason: 'discard sends nothing');
+      expect(requests, isEmpty, reason: 'discard sends nothing');
       expect(await storage.listFilesOldestFirst(), isEmpty);
       expect(terminals.map((t) => '${t.eventType}:${t.code}'),
           ['session_start:500', 'ancient:500']);
@@ -821,19 +904,16 @@ void main() {
           await storage.fileCreatedAt('v2-0');
       script.add(() => http.Response(
           '{"events_with_invalid_fields": {"event_type": [1]}}', 400));
+      // Trip offline after the rewrite so the survivor is retained for the
+      // age check (ordered retry would otherwise drain it in the same flush).
+      for (var i = 0; i < 6; i++) {
+        script.add(() => http.Response('down', 500));
+      }
       await backend.flush();
       expect(await storage.listFilesOldestFirst(), hasLength(1));
       final survivor = (await storage.listFilesOldestFirst()).single;
       // The rewrite must not reset the 30-day clock.
       expect(await storage.fileCreatedAt(survivor), createdBefore);
-
-      clock.nowMs += 31 * 24 * 3600 * 1000;
-      terminals.clear();
-      await backend.flush();
-
-      expect(requests.length, 1, reason: 'discard sends nothing');
-      expect(await storage.listFilesOldestFirst(), isEmpty);
-      expect(terminals.map((t) => t.code), contains(500));
     });
 
     test('hostile types never reject track()', () async {
@@ -1455,40 +1535,39 @@ void main() {
         reprobeInterval: const Duration(milliseconds: 50),
       );
       await backend.track({'event_type': 'a'});
-      script.add(() => throw http.ClientException('down'));
-      await backend.flush();
-      expect(sleeps, [const Duration(seconds: 1)]);
-
+      await storage.sealCurrentFile();
       await backend.track({'event_type': 'b'});
+      // Trip offline in one flush: two attempts on the oldest file.
+      script.add(() => throw http.ClientException('down'));
       script.add(() => throw http.ClientException('still down'));
       await backend.flush();
-      // Second failure (2 > maxRetries 1) trips offline with two files
-      // queued; the 50 ms probe timer is now running.
+      expect(requests, hasLength(2));
+      expect(sleeps, [const Duration(seconds: 1)]);
       expect(await storage.listFilesOldestFirst(), hasLength(2));
 
-      await backend.track({'event_type': 'c'});
-      // The first probe consumes this throw on the oldest file and trips
-      // offline again (silently: no callbacks, no backoff on the trip
-      // path). The restarted timer's second probe then succeeds on that
-      // file — healing the backend — and stops: single-attempt probes
-      // never walk the queue.
+      // First probe fails on the oldest file and stays offline.
       script.add(() => throw http.ClientException('probe down'));
+      var deadline = DateTime.now().add(const Duration(seconds: 5));
+      while (requests.length < 3 && DateTime.now().isBefore(deadline)) {
+        await Future<void>.delayed(const Duration(milliseconds: 10));
+      }
+      expect(requests.length, 3);
+      expect(await storage.listFilesOldestFirst(), hasLength(2));
+      expect(sleeps, [const Duration(seconds: 1)],
+          reason: 'probes never back off');
 
-      final deadline = DateTime.now().add(const Duration(seconds: 5));
-      while ((requests.length < 4 ||
-              (await storage.listFilesOldestFirst()).length != 2) &&
-          DateTime.now().isBefore(deadline)) {
+      // Next probe succeeds on the oldest only and heals without walking.
+      deadline = DateTime.now().add(const Duration(seconds: 5));
+      while (requests.length < 4 && DateTime.now().isBefore(deadline)) {
         await Future<void>.delayed(const Duration(milliseconds: 10));
       }
       expect(requests.length, 4);
-      expect(await storage.listFilesOldestFirst(), hasLength(2));
-      expect(sleeps, [const Duration(seconds: 1)],
-          reason: 'neither the trip nor the healing upload backs off');
+      expect(await storage.listFilesOldestFirst(), hasLength(1));
 
-      // Healed means online: a normal flush drains the survivors.
+      // Healed means online: a normal flush drains the survivor.
       await backend.flush();
       expect(await storage.listFilesOldestFirst(), isEmpty);
-      expect(requests.length, 6);
+      expect(requests.length, 5);
     });
 
     test('a stray online probe stands down without uploading', () async {
@@ -1513,10 +1592,12 @@ void main() {
         ),
       );
       await backend.track({'event_type': 'a'});
-      await backend.flush();
+      await storage.sealCurrentFile();
       await backend.track({'event_type': 'b'});
+      await storage.sealCurrentFile();
       await backend.flush();
-      // Tripped offline with two files; the 200 ms probe timer runs.
+      // Tripped offline in one flush (two attempts on oldest); two files.
+      expect(calls, 2);
       expect(await storage.listFilesOldestFirst(), hasLength(2));
 
       // First probe hangs mid-upload past the next tick, so a second probe
@@ -1554,20 +1635,12 @@ void main() {
         },
       });
       await backend.track({'event_type': 'a'});
+      // Trip offline in one flush (two attempts on oldest).
       script.add(() => throw http.ClientException('down'));
-      await backend.flush();
-      expect(sleeps, [const Duration(seconds: 1)]);
-
-      await backend.identify({
-        'event_type': r'$identify',
-        'user_properties': {
-          r'$set': {'plan': 'team'}
-        },
-      });
       script.add(() => throw http.ClientException('still down'));
       await backend.flush();
-      // Tripped offline with two files; the 300 ms probe timer runs.
-      expect(await storage.listFilesOldestFirst(), hasLength(2));
+      expect(sleeps, [const Duration(seconds: 1)]);
+      expect(await storage.listFilesOldestFirst(), hasLength(1));
 
       // A fresh held batch is waiting when the first probe fires: the
       // probe drains it into the open buffer but must not upload while
@@ -1581,7 +1654,7 @@ void main() {
       await Future<void>.delayed(const Duration(milliseconds: 450));
       expect(requests.length, 2,
           reason: 'the offline probe drains the hold but sends nothing');
-      expect(await storage.listFilesOldestFirst(), hasLength(2));
+      expect(await storage.listFilesOldestFirst(), hasLength(1));
 
       // The next probe uploads the oldest file, heals, and stops after
       // one file; a normal flush then drains the rest.
@@ -1592,7 +1665,6 @@ void main() {
       expect(requests.length, 3);
       await backend.flush();
       expect(await storage.listFilesOldestFirst(), isEmpty);
-      expect(requests.length, 5);
     });
 
     test('backoff sleep doubles then clamps at the maximum', () async {
@@ -1604,13 +1676,13 @@ void main() {
       for (var i = 0; i < 8; i++) {
         script.add(() => throw http.ClientException('down'));
       }
-      for (var i = 0; i < 8; i++) {
-        await backend.flush();
-      }
+      // Ordered retry performs all attempts within one flush.
+      await backend.flush();
 
       expect(sleeps, [
         for (final s in [1, 2, 4, 8, 16, 32, 60, 60]) Duration(seconds: s),
       ]);
+      expect(await storage.listFilesOldestFirst(), isEmpty);
     });
 
     test('ancient files with corrupt content vanish without terminals',

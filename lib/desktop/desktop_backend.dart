@@ -621,124 +621,129 @@ class DesktopBackend {
       await storage.sealCurrentFile();
       _pendingCount = 0;
 
-    var files = await storage.listFilesOldestFirst();
-    final skip = <String>{};
-    var index = 0;
-    while (index < files.length) {
-      final name = files[index];
-      index += 1;
-      if (skip.contains(name)) {
-        continue;
-      }
-      final raw = await storage.readFile(name);
-      if (raw == null) {
-        // Listed but unreadable: in the v1 single-writer design this is
-        // corruption by definition (plan §B.3) — quarantine so it can
-        // never wedge the queue.
-        _log(2, 'quarantining unreadable queue file $name');
-        await storage.quarantineFile(name);
-        skip.add(name);
-        continue;
-      }
-      late final List<Map<String, dynamic>> events;
-      try {
-        events = splitDesktopFileContent(raw)
-            .map((line) => Map<String, dynamic>.from(json.decode(line) as Map))
-            .toList();
-      } catch (_) {
-        // One corrupt file must never wedge the queue.
-        _log(2, 'quarantining unreadable queue file $name');
-        await storage.quarantineFile(name);
-        skip.add(name);
-        continue;
-      }
-      if (events.isEmpty) {
-        await storage.removeFile(name);
-        continue;
-      }
-      final endpoint = deriveDesktopEndpoint(
-        serverUrl: config.serverUrl,
-        zone: config.serverZone,
-        useBatch: config.useBatch,
-      );
-      final result = await _transport.upload(
-        endpoint: endpoint,
-        apiKey: config.apiKey,
-        events: events,
-        minIdLength: config.minIdLength,
-        nowMs: _clock(),
-      );
-      if (result.transportFailed) {
-        _failures += 1;
-        if (_failures > config.flushMaxRetries) {
-          _tripOffline();
+      // Oldest-first ordered retry: every iteration re-lists storage and takes
+      // only the first file. A retryable failure therefore retries that same
+      // oldest file (with backoff) and never lets a newer file overtake it.
+      // Handled mutations (remove, rewrite, split, quarantine) are observed
+      // via the fresh listing; no index arithmetic is kept across iterations.
+      // `quarantinedThisFlush` guards only against a lying listing that keeps
+      // returning a file already quarantined (duplicate-listing fakes); real
+      // storage removes the file so the set stays empty in production.
+      final quarantinedThisFlush = <String>{};
+      while (true) {
+        final files = await storage.listFilesOldestFirst();
+        String? name;
+        for (final candidate in files) {
+          if (!quarantinedThisFlush.contains(candidate)) {
+            name = candidate;
+            break;
+          }
+        }
+        if (name == null) {
           return;
         }
-        await _sleeper(_backoffFor(_failures));
-        // No single-attempt early-return here. Online probes return at the
-        // entry guard above, and an offline probe is always over budget
-        // (only `_tripOffline` sets offline, only when over budget; only
-        // a success resets it, which heals and returns below) — so a
-        // probe can never fail within budget. Falling through to the
-        // loop-end single-attempt return is correct regardless.
-        continue;
-      }
-      final decision = decideDesktopDispatch(
-        statusCode: result.statusCode,
-        responseBody: result.body,
-        events: events,
-      );
-      if (decision is DispatchSuccess) {
-        await storage.removeFile(name);
-        _noteProgress();
-        for (final event in events) {
-          _fireTerminal(event, 200, 'Event uploaded');
+        final raw = await storage.readFile(name);
+        if (raw == null) {
+          // Listed but unreadable: in the v1 single-writer design this is
+          // corruption by definition (plan §B.3) — quarantine so it can
+          // never wedge the queue. Local recovery costs no network attempt.
+          _log(2, 'quarantining unreadable queue file $name');
+          await storage.quarantineFile(name);
+          quarantinedThisFlush.add(name);
+          continue;
         }
-      } else if (decision is DispatchDropFile) {
-        await storage.removeFile(name);
-        _noteProgress();
-        for (final event in events) {
-          _fireTerminal(event, decision.code, decision.message);
+        late final List<Map<String, dynamic>> events;
+        try {
+          events = splitDesktopFileContent(raw)
+              .map((line) =>
+                  Map<String, dynamic>.from(json.decode(line) as Map))
+              .toList();
+        } catch (_) {
+          // One corrupt file must never wedge the queue.
+          _log(2, 'quarantining unreadable queue file $name');
+          await storage.quarantineFile(name);
+          quarantinedThisFlush.add(name);
+          continue;
         }
-      } else if (decision is DispatchDropSome) {
-        final parts = partitionDesktopEvents(events, decision);
-        for (final event in parts.drop) {
-          _fireTerminal(event, decision.code, decision.message);
-        }
-        if (parts.keep.isEmpty) {
+        if (events.isEmpty) {
           await storage.removeFile(name);
+          continue;
+        }
+        final endpoint = deriveDesktopEndpoint(
+          serverUrl: config.serverUrl,
+          zone: config.serverZone,
+          useBatch: config.useBatch,
+        );
+        final result = await _transport.upload(
+          endpoint: endpoint,
+          apiKey: config.apiKey,
+          events: events,
+          minIdLength: config.minIdLength,
+          nowMs: _clock(),
+        );
+        if (result.transportFailed) {
+          _failures += 1;
+          if (_failures > config.flushMaxRetries) {
+            _tripOffline();
+            return;
+          }
+          await _sleeper(_backoffFor(_failures));
+          // Retry the same oldest file; do not advance. Probes never reach
+          // here within budget (offline implies over budget, so they trip
+          // above); normal flushes retry below.
+          continue;
+        }
+        final decision = decideDesktopDispatch(
+          statusCode: result.statusCode,
+          responseBody: result.body,
+          events: events,
+        );
+        if (decision is DispatchSuccess) {
+          await storage.removeFile(name);
+          _noteProgress();
+          for (final event in events) {
+            _fireTerminal(event, 200, 'Event uploaded');
+          }
+        } else if (decision is DispatchDropFile) {
+          await storage.removeFile(name);
+          _noteProgress();
+          for (final event in events) {
+            _fireTerminal(event, decision.code, decision.message);
+          }
+        } else if (decision is DispatchDropSome) {
+          final parts = partitionDesktopEvents(events, decision);
+          for (final event in parts.drop) {
+            _fireTerminal(event, decision.code, decision.message);
+          }
+          if (parts.keep.isEmpty) {
+            await storage.removeFile(name);
+          } else {
+            await storage.writeFile(name,
+                joinDesktopFileContent(parts.keep.map(json.encode).toList()));
+          }
+          if (decision.throttle) {
+            _throttleUntilMs = _clock() + DesktopRetry.throttleSeconds * 1000;
+            _log(2, 'server throttled uploads; pausing for 30 s');
+            return;
+          }
+          _noteProgress();
+        } else if (decision is DispatchSplit) {
+          await storage.splitFile(name);
+          continue;
         } else {
-          await storage.writeFile(name,
-              joinDesktopFileContent(parts.keep.map(json.encode).toList()));
+          // DispatchRetry: retry the same oldest file with backoff.
+          _failures += 1;
+          if (_failures > config.flushMaxRetries) {
+            _tripOffline();
+            return;
+          }
+          await _sleeper(_backoffFor(_failures));
+          continue;
         }
-        if (decision.throttle) {
-          _throttleUntilMs = _clock() + DesktopRetry.throttleSeconds * 1000;
-          _log(2, 'server throttled uploads; pausing for 30 s');
+        if (singleAttempt) {
           return;
         }
-        _noteProgress();
-      } else if (decision is DispatchSplit) {
-        final halves = await storage.splitFile(name);
-        files = [
-          ...files.sublist(0, index - 1),
-          ...halves,
-          ...files.sublist(index),
-        ];
-        index -= 1;
-        continue;
-      } else {
-        // DispatchRetry.
-        _failures += 1;
-        if (_failures > config.flushMaxRetries) {
-          _tripOffline();
-          return;
-        }
-        await _sleeper(_backoffFor(_failures));
       }
-      if (singleAttempt) {
-        return;
-      }
-    }
     } finally {
       _isFlushing = false;
     }
