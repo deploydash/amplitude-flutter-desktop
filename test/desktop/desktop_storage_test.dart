@@ -127,12 +127,15 @@ void testDesktopStorageConformance(
       await storage.appendEvent('keep');
       await storage.sealCurrentFile();
       await storage.writeFile('v2-0', 'keep', createdAtMs: 7);
-      expect(await storage.fileCreatedAt('v2-0'), 7);
+      // Compared at one-second granularity: Windows reports modification
+      // times truncated to whole seconds, so exact-millisecond equality
+      // cannot hold there — while a reset clock (now) would still fail.
+      expect((await storage.fileCreatedAt('v2-0'))! ~/ 1000, 0);
       // A rewrite without an explicit timestamp must preserve the
       // original creation time (not reset the 30-day age): this is what
       // the partial-400 path relies on.
       await storage.writeFile('v2-0', 'keep');
-      expect(await storage.fileCreatedAt('v2-0'), 7);
+      expect((await storage.fileCreatedAt('v2-0'))! ~/ 1000, 0);
       expect(await storage.readFile('v2-0'), 'keep');
     });
 

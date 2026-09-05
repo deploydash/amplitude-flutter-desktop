@@ -443,8 +443,12 @@ void main() {
 
         final halves = await storage.splitFile('v2-0');
         expect(halves, ['v2-0-1', 'v2-0-2']);
-        expect(await storage.fileCreatedAt('v2-0-1'), before);
-        expect(await storage.fileCreatedAt('v2-0-2'), before);
+        // One-second granularity: Windows truncates modification times, so
+        // preservation is compared per second, not per millisecond.
+        expect((await storage.fileCreatedAt('v2-0-1'))! ~/ 1000,
+            before! ~/ 1000);
+        expect((await storage.fileCreatedAt('v2-0-2'))! ~/ 1000,
+            before ~/ 1000);
       } finally {
         await root.delete(recursive: true);
       }
@@ -581,7 +585,9 @@ void main() {
         final before = DateTime.now().millisecondsSinceEpoch;
         await storage.writeFile('v2-new', 'content');
         final created = await storage.fileCreatedAt('v2-new');
-        expect(created, greaterThanOrEqualTo(before));
+        // Lower bound allows one second of truncation: Windows reports
+        // modification times truncated to whole seconds.
+        expect(created, greaterThanOrEqualTo(before - 1000));
         expect(
           created!,
           lessThanOrEqualTo(DateTime.now().millisecondsSinceEpoch),
