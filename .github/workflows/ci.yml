@@ -35,20 +35,13 @@ jobs:
 
   # Desktop gates (T-12): enforced 100% desktop coverage plus real
   # Linux/Windows builds and public-plugin integration. Additive: the
-  # upstream mobile/web `test` job above is untouched.
-  desktop:
-    name: Desktop ${{ matrix.flutter-version }} (${{ matrix.os }})
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: ubuntu-latest
-            flutter-version: '3.38.1'
-          - os: ubuntu-latest
-            # Quoted: unquoted `stable` parses as YAML boolean true and
-            # reaches the setup action as an empty version (failed in 5 s).
-            flutter-version: 'stable'
-    runs-on: ${{ matrix.os }}
+  # upstream mobile/web `test` job above is untouched. Ubuntu runs both the
+  # lowest supported toolchain and current stable; the stable entries pass
+  # no `flutter-version` key because subosito/flutter-action v2 rejects an
+  # empty one (and the string `stable` is not a resolvable version).
+  desktop-floor:
+    name: Desktop Flutter 3.38.1 (ubuntu-latest)
+    runs-on: ubuntu-latest
     steps:
       - name: Checkout
         uses: actions/checkout@f43a0e5ff2bd294095638e18286ca9a3d1956744 # v3
@@ -57,7 +50,7 @@ jobs:
         uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2
         with:
           channel: 'stable'
-          flutter-version: ${{ matrix.flutter-version }}
+          flutter-version: '3.38.1'
 
       - name: Check Flutter version
         run: flutter --version
@@ -93,7 +86,58 @@ jobs:
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: desktop-coverage-${{ matrix.flutter-version }}
+          name: desktop-coverage-3.38.1
+          path: |
+            coverage/desktop-lcov.info
+            coverage/desktop-test.log
+
+  desktop-stable:
+    name: Desktop stable (ubuntu-latest)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@f43a0e5ff2bd294095638e18286ca9a3d1956744 # v3
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2
+        with:
+          channel: 'stable'
+
+      - name: Check Flutter version
+        run: flutter --version
+
+      - name: Install Linux desktop build dependencies
+        run: >
+          sudo apt-get update &&
+          sudo apt-get install -y clang cmake ninja-build pkg-config
+          libgtk-3-dev liblzma-dev xvfb
+
+      - name: Install packages
+        run: flutter pub get
+
+      - name: Linter
+        run: flutter analyze
+
+      - name: Unit tests
+        run: flutter test
+
+      - name: Desktop 100% line/branch coverage gate
+        run: dart run tool/check_desktop_coverage.dart
+
+      - name: Linux example debug build
+        run: cd example && flutter build linux --debug
+
+      - name: Linux example release build
+        run: cd example && flutter build linux --release
+
+      - name: Public-plugin integration on Linux
+        run: cd example && xvfb-run -a flutter test integration_test -d linux
+
+      - name: Upload coverage and logs
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: desktop-coverage-stable
           path: |
             coverage/desktop-lcov.info
             coverage/desktop-test.log
@@ -108,11 +152,14 @@ jobs:
       - name: Checkout
         uses: actions/checkout@f43a0e5ff2bd294095638e18286ca9a3d1956744 # v3
 
+      # Tracks stable, not the 3.38.1 floor: 3.38.1 requests the Visual
+      # Studio 16 2019 CMake generator, which current windows-latest images
+      # no longer ship (run 34026673059). The floor stays enforced by the
+      # Ubuntu 3.38.1 job above.
       - name: Setup Flutter
         uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2
         with:
           channel: 'stable'
-          flutter-version: '3.38.1'
 
       - name: Check Flutter version
         run: flutter --version
