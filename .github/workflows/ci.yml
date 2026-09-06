@@ -1,6 +1,10 @@
 name: Test and Lint
 
-on: [pull_request]
+# Pushes to main only: this fork lands work by direct pushes, and pull
+# request runs are deliberately off.
+on:
+  push:
+    branches: [main]
 
 jobs:
   test:
