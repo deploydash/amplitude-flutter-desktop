@@ -45,7 +45,9 @@ jobs:
           - os: ubuntu-latest
             flutter-version: '3.38.1'
           - os: ubuntu-latest
-            flutter-version: stable
+            # Quoted: unquoted `stable` parses as YAML boolean true and
+            # reaches the setup action as an empty version (failed in 5 s).
+            flutter-version: 'stable'
     runs-on: ${{ matrix.os }}
     steps:
       - name: Checkout

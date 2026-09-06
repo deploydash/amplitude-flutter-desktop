@@ -92,6 +92,23 @@ class FailOnceStorage extends InMemoryDesktopStorage {
   }
 }
 
+/// Storage whose queue listing fails on demand: proves a storage failure
+/// inside the flush loop propagates to the caller instead of hanging, and
+/// the in-flush guard is still released for later threshold flushes.
+class ThrowingFlushStorage extends InMemoryDesktopStorage {
+  ThrowingFlushStorage({required super.clock, this.throwLists = true});
+
+  bool throwLists;
+
+  @override
+  Future<List<String>> listFilesOldestFirst() async {
+    if (throwLists) {
+      throw StateError('disk gone');
+    }
+    return super.listFilesOldestFirst();
+  }
+}
+
 /// Storage that lists the same unreadable file twice: exercises the flush
 /// loop's `skip` set, which must deduplicate a corrupt listing instead of
 /// quarantining (and logging) the same file twice.
@@ -1363,6 +1380,28 @@ void main() {
 
       expect(await storage.listFilesOldestFirst(), isEmpty);
       expect(requests, isEmpty);
+    });
+
+    test('a storage failure inside flush releases the in-flush guard',
+        () async {
+      final throwing = ThrowingFlushStorage(clock: clock.call);
+      final backend = await makeBackend(
+        config: configMap(flushQueueSize: 3),
+        storageOverride: throwing,
+      );
+      await backend.track({'event_type': 'a'});
+
+      // The listing failure propagates instead of hanging the flush.
+      await expectLater(backend.flush(), throwsStateError);
+
+      // The guard was released: reaching the threshold still auto-flushes.
+      throwing.throwLists = false;
+      await backend.track({'event_type': 'b'});
+      expect(requests, hasLength(1));
+      expect(
+        uploadedEventTypes(),
+        ['session_start', 'a', 'b'],
+      );
     });
 
     test('transport exceptions exhaust retries and trip offline silently',
