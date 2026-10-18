@@ -43,7 +43,7 @@ Map<String, dynamic> enrich(
     coppa: coppa,
     os: testOs,
     app: testApp,
-    library: 'amplitude-flutter/4.7.1',
+    library: 'amplitude-flutter/4.7.3',
     identityUserId: 'user-1',
     identityDeviceId: 'device-1',
     configPartnerId: 'partner-1',
@@ -124,7 +124,7 @@ void main() {
       final out = enrich({'event_type': 'x'});
       expect(out['user_id'], 'user-1');
       expect(out['device_id'], 'device-1');
-      expect(out['library'], 'amplitude-flutter/4.7.1');
+      expect(out['library'], 'amplitude-flutter/4.7.3');
       expect(out['partner_id'], 'partner-1');
       expect(out['platform'], 'Linux');
       expect(out['os_name'], 'linux');
@@ -179,7 +179,7 @@ void main() {
         coppa: false,
         os: const DesktopOsInfo(platform: 'Linux', osName: 'linux'),
         app: testApp,
-        library: 'amplitude-flutter/4.7.1',
+        library: 'amplitude-flutter/4.7.3',
         language: 'en-US',
       );
       expect(out['os_version'], 'host-os');
@@ -199,7 +199,7 @@ void main() {
 
     test('library always wins over host values', () {
       final out = enrich({'event_type': 'x', 'library': 'custom/1.0'});
-      expect(out['library'], 'amplitude-flutter/4.7.1');
+      expect(out['library'], 'amplitude-flutter/4.7.3');
     });
 
     test('disabled flags let host context values survive', () {
@@ -272,7 +272,7 @@ void main() {
 
   group('desktopLibrary', () {
     test('matches the native library format', () {
-      expect(desktopLibrary(), 'amplitude-flutter/4.7.1');
+      expect(desktopLibrary(), 'amplitude-flutter/4.7.3');
     });
   });
 }
