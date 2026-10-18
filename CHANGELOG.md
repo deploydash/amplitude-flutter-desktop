@@ -13,6 +13,20 @@
   Flutter `>=3.38.1` (the effective floor of its `device_info_plus`,
   `package_info_plus`, and `path_provider` dependencies).
 
+## [4.7.3](https://github.com/amplitude/Amplitude-Flutter/compare/v4.7.2...v4.7.3) (2026-10-05)
+
+
+### Bug Fixes
+
+* **android:** align plugin Java and Kotlin targets to 17 ([#322](https://github.com/amplitude/Amplitude-Flutter/issues/322)) ([f210c66](https://github.com/amplitude/Amplitude-Flutter/commit/f210c6616a92ebbc347e71ec864dd0586722a8e0))
+
+## [4.7.2](https://github.com/amplitude/Amplitude-Flutter/compare/v4.7.1...v4.7.2) (2026-09-21)
+
+
+### Bug Fixes
+
+* **android:** update compileSdk to 35 and Java compatibility to 17 ([#314](https://github.com/amplitude/Amplitude-Flutter/issues/314)) ([7c4cfd7](https://github.com/amplitude/Amplitude-Flutter/commit/7c4cfd7db12546ffb7d34627620d4d0a1da9b765))
+
 ## [4.7.1](https://github.com/amplitude/Amplitude-Flutter/compare/v4.7.0...v4.7.1) (2026-08-11)
 
 

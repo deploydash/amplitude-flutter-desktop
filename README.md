@@ -226,6 +226,8 @@ debug/release and Windows release example builds, and a public-`Amplitude`
 loopback integration test (timestamped wire contract, two-instance
 isolation, lifecycle rotation, restart drain) on both desktop devices.
 
+On Android, the plugin compiles against API 36 and needs JDK 17 and Android Gradle Plugin 8.6 or later. It's built with your app's Kotlin version, which must be 1.8 or later; Kotlin 1.8.22 through 2.2.20 are tested. Applications control their own `targetSdk`.
+
 ## Need Help?
 
 For anything in this fork — especially the Linux/Windows backend — please

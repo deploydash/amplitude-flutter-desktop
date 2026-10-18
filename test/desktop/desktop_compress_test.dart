@@ -20,7 +20,10 @@ class _ThrowingList extends ListBase<int> {
 void main() {
   group('IdentityDesktopCompressor', () {
     test('reports unavailable and passes bytes through untouched', () {
-      const compressor = IdentityDesktopCompressor();
+      // Non-const construction: a const invocation may never execute
+      // the generative constructor at runtime (codegen detail), which
+      // flips line coverage of the constructor across toolchains.
+      final compressor = IdentityDesktopCompressor();
       expect(compressor.available, isFalse);
       const raw = [1, 2, 3];
       expect(compressor.encode(raw), same(raw));
