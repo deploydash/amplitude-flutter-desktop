@@ -2,6 +2,8 @@ import 'package:device_info_plus/device_info_plus.dart';
 import 'package:flutter/foundation.dart';
 import 'package:package_info_plus/package_info_plus.dart';
 
+import 'desktop_arch.dart';
+
 // OS/app facts for enrichment, behind wrapper interfaces (plan §H.5).
 //
 // WHY wrappers instead of calling the plugins inline: every enrichment
@@ -58,11 +60,14 @@ class DeviceInfoDesktopSystemInfo implements DesktopSystemInfoSource {
   DeviceInfoDesktopSystemInfo({
     DeviceInfoPlugin? plugin,
     TargetPlatform? platformOverride,
+    String? Function()? archSource,
   })  : _plugin = plugin ?? DeviceInfoPlugin(),
-        _override = platformOverride;
+        _override = platformOverride,
+        _archSource = archSource ?? currentDesktopArch;
 
   final DeviceInfoPlugin _plugin;
   final TargetPlatform? _override;
+  final String? Function() _archSource;
 
   @override
   Future<DesktopOsInfo> currentOs() async {
@@ -71,30 +76,42 @@ class DeviceInfoDesktopSystemInfo implements DesktopSystemInfoSource {
       switch (platform) {
         case TargetPlatform.linux:
           final info = await _plugin.linuxInfo;
+          final versionDetail = info.versionId ?? info.version;
+          final linuxArch = _archSource();
           return DesktopOsInfo(
             platform: 'Linux',
             osName: 'linux',
-            osVersion: info.versionId ?? info.version ?? info.prettyName,
-            // `device_info_plus` exposes /etc/os-release (distro), not
-            // hardware: never report it as device model.
-            deviceModel: null,
-            deviceManufacturer: null,
+            // Distro flavour (e.g. `Ubuntu 24.04`) stays in the OS
+            // version, where Amplitude needs no mapping for it.
+            osVersion: versionDetail == null
+                ? info.prettyName
+                : '${info.name} $versionDetail',
+            // Desktops expose no hardware model, so the device model
+            // carries a stable platform + arch identifier for the
+            // analytics taxonomy instead of nothing. Never substitute
+            // computer/user/machine IDs.
+            deviceModel:
+                linuxArch == null ? 'Linux' : 'Linux $linuxArch',
+            deviceManufacturer: 'Linux',
           );
         case TargetPlatform.windows:
           final info = await _plugin.windowsInfo;
           // `productName` is an OS edition (e.g. Windows 11 Pro), not
-          // hardware: fold it into the OS version string and leave the
-          // hardware model unset. Never substitute computer/user/machine IDs.
+          // hardware: fold it into the OS version string. Never
+          // substitute computer/user/machine IDs.
           final display = info.displayVersion.isNotEmpty
               ? '${info.productName} ${info.displayVersion} '
                   '(${info.buildNumber})'
               : '${info.productName} (${info.buildNumber})';
+          final windowsArch = _archSource();
           return DesktopOsInfo(
             platform: 'Windows',
             osName: 'windows',
             osVersion: display,
-            deviceModel: null,
-            deviceManufacturer: null,
+            // Stable platform + arch identifier (see the Linux branch).
+            deviceModel:
+                windowsArch == null ? 'Windows' : 'Windows $windowsArch',
+            deviceManufacturer: 'Microsoft',
           );
         case TargetPlatform.macOS:
           final info = await _plugin.macOsInfo;

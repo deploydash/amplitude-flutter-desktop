@@ -184,10 +184,13 @@ to provide them.)
   guarantee.
 - **Context fields:** with IP tracking on and COPPA off, events carry
   `ip: $remote` for server-side lookup unless the host set an explicit IP;
-  disabling IP tracking or enabling COPPA removes it. `device_model` is
-  omitted when no real hardware model exists — a Linux distribution name or
-  Windows edition is OS fact, not hardware, and is folded into `os_version`
-  instead.
+  disabling IP tracking or enabling COPPA removes it. Desktops expose no
+  hardware model, so `device_model` carries a stable platform + arch
+  identifier (`Windows x64`, `Linux arm64`, …; manufacturer
+  `Microsoft`/`Linux`, unqualified when the arch is unknown) for the
+  analytics taxonomy. OS flavour stays in `os_version` — the Linux distro
+  name (`Ubuntu 24.04`) and the Windows edition (`Windows 11 Pro 22H2
+  (22621)`) — where Amplitude needs no mapping for it.
 - **Foreground signals are automatic for public `Amplitude` users.** On
   Linux/Windows the public API calls the in-process desktop backend
   directly (the engine channel cannot deliver Dart-to-Dart calls, so there
