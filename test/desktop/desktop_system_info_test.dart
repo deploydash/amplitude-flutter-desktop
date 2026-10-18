@@ -127,14 +127,14 @@ void main() {
           linux: linuxInfo(versionId: '24.04', version: 'ignored'),
         ),
         platformOverride: TargetPlatform.linux,
+        archSource: () => 'x64',
       ).currentOs();
 
       expect(os.platform, 'Linux');
       expect(os.osName, 'linux');
-      expect(os.osVersion, '24.04');
-      expect(os.deviceModel, isNull,
-          reason: 'distro name is OS fact, not hardware model');
-      expect(os.deviceManufacturer, isNull);
+      expect(os.osVersion, 'Ubuntu 24.04');
+      expect(os.deviceModel, 'Linux x64');
+      expect(os.deviceManufacturer, 'Linux');
     });
 
     test('linux falls back through version to prettyName', () async {
@@ -143,12 +143,14 @@ void main() {
           linux: linuxInfo(version: '24.04 (Noble Numbat)'),
         ),
         platformOverride: TargetPlatform.linux,
+        archSource: () => 'x64',
       ).currentOs();
-      expect(os.osVersion, '24.04 (Noble Numbat)');
+      expect(os.osVersion, 'Ubuntu 24.04 (Noble Numbat)');
 
       os = await DeviceInfoDesktopSystemInfo(
         plugin: FakeDeviceInfoPlugin(linux: linuxInfo()),
         platformOverride: TargetPlatform.linux,
+        archSource: () => 'x64',
       ).currentOs();
       expect(os.osVersion, 'Ubuntu 24.04 LTS');
     });
@@ -157,6 +159,7 @@ void main() {
       final os = await DeviceInfoDesktopSystemInfo(
         plugin: FakeDeviceInfoPlugin(windows: windowsInfo()),
         platformOverride: TargetPlatform.windows,
+        archSource: () => 'x64',
       ).currentOs();
 
       expect(os.platform, 'Windows');
@@ -164,20 +167,53 @@ void main() {
       expect(os.osVersion, contains('Windows 11 Pro'));
       expect(os.osVersion, contains('22H2'));
       expect(os.osVersion, contains('22621'));
-      expect(os.deviceModel, isNull,
-          reason: 'Windows edition is OS fact, not hardware model');
-      expect(os.deviceManufacturer, isNull);
+      expect(os.deviceModel, 'Windows x64');
+      expect(os.deviceManufacturer, 'Microsoft');
     });
 
     test('windows without displayVersion reports the build number', () async {
       final os = await DeviceInfoDesktopSystemInfo(
         plugin: FakeDeviceInfoPlugin(windows: windowsInfo(displayVersion: '')),
         platformOverride: TargetPlatform.windows,
+        archSource: () => 'arm64',
       ).currentOs();
 
       expect(os.osVersion, contains('Windows 11 Pro'));
       expect(os.osVersion, contains('22621'));
-      expect(os.deviceModel, isNull);
+      expect(os.deviceModel, 'Windows arm64');
+      expect(os.deviceManufacturer, 'Microsoft');
+    });
+
+    test('device model is unqualified when the arch is unknown', () async {
+      var os = await DeviceInfoDesktopSystemInfo(
+        plugin: FakeDeviceInfoPlugin(
+          linux: linuxInfo(versionId: '24.04'),
+        ),
+        platformOverride: TargetPlatform.linux,
+        archSource: () => null,
+      ).currentOs();
+      expect(os.deviceModel, 'Linux');
+      expect(os.deviceManufacturer, 'Linux');
+
+      os = await DeviceInfoDesktopSystemInfo(
+        plugin: FakeDeviceInfoPlugin(windows: windowsInfo()),
+        platformOverride: TargetPlatform.windows,
+        archSource: () => null,
+      ).currentOs();
+      expect(os.deviceModel, 'Windows');
+      expect(os.deviceManufacturer, 'Microsoft');
+    });
+
+    test('the default arch source reports the current ABI', () async {
+      final os = await DeviceInfoDesktopSystemInfo(
+        plugin: FakeDeviceInfoPlugin(
+          linux: linuxInfo(versionId: '24.04'),
+        ),
+        platformOverride: TargetPlatform.linux,
+      ).currentOs();
+
+      expect(os.deviceModel, startsWith('Linux'));
+      expect(os.deviceManufacturer, 'Linux');
     });
 
     test('macOS maps release, model, and Apple manufacturer', () async {

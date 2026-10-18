@@ -23,6 +23,10 @@ import 'package:path/path.dart' as p;
 /// exempt file disappears from the tree or unexpectedly starts appearing
 /// in LCOV (meaning it grew real code and needs tests, not exemption).
 const Map<String, String> desktopCoverageExemptions = {
+  'lib/desktop/desktop_arch.dart':
+      'export-only file: conditional export, no statements',
+  'lib/desktop/desktop_arch_stub.dart':
+      'non-IO conditional stub: never compiled into the VM build',
   'lib/desktop/desktop_compress.dart':
       'export-only file: conditional export plus re-export, no statements',
   'lib/desktop/desktop_compress_stub.dart':
