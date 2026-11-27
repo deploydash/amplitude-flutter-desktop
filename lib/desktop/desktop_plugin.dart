@@ -120,7 +120,16 @@ class DesktopAmplitudePlugin {
     }
     try {
       source.start((state, timestampMs) {
-        unawaited(handleLifecycleForTests(state, timestampMs));
+        unawaited(
+          handleLifecycleForTests(state, timestampMs).catchError((
+            Object error,
+          ) {
+            debugPrint(
+              'Amplitude desktop: lifecycle change to ${state.name} failed '
+              '(${error.runtimeType}).',
+            );
+          }),
+        );
       });
     } catch (_) {
       // Observations unavailable; direct calls still work.
@@ -232,12 +241,12 @@ class DesktopAmplitudePlugin {
         // decides whether the app may exit; the host owns that.
         _isForeground = false;
         _detached = true;
+        _lifecycleSource?.stop();
         await Future.wait(
           instances.values.map(
             (backend) => backend.onExitForeground(timestampMs),
           ),
         );
-        _lifecycleSource?.stop();
     }
   }
 

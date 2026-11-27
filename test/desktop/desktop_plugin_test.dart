@@ -106,6 +106,21 @@ class ThrowingLifecycleSource implements DesktopLifecycleSource {
   void stop() {}
 }
 
+class _FailingLifecycleBackend extends DesktopBackend {
+  _FailingLifecycleBackend()
+    : super(
+        storage: InMemoryDesktopStorage(),
+        transport: DesktopTransport(
+          client: MockClient((_) async => http.Response('{}', 200)),
+        ),
+      );
+
+  @override
+  Future<void> onExitForeground(int timestampMs) async {
+    throw StateError('storage unavailable');
+  }
+}
+
 Map<String, dynamic> initArgs({String instance = 'test'}) {
   return Map<String, dynamic>.from(
     Configuration(apiKey: 'test-key', instanceName: instance).toMap(),
@@ -727,6 +742,22 @@ void main() {
       } finally {
         await plugin.dispose();
       }
+    });
+
+    test('a lifecycle failure stays inside the plugin on detachment', () async {
+      final source = FakeLifecycleSource();
+      final plugin = DesktopAmplitudePlugin(
+        lifecycleSource: source,
+        backendFactory: _FailingLifecycleBackend.new,
+      );
+      addTearDown(plugin.dispose);
+      await call(plugin, 'init', initArgs());
+
+      source.fire(AppLifecycleState.detached, 1000);
+      // Drain the async callback. An unhandled failure fails the test.
+      await Future<void>.delayed(Duration.zero);
+
+      expect(source.stops, 1);
     });
 
     test('paused initial state starts background', () async {
