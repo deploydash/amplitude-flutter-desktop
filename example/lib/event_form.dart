@@ -1,4 +1,4 @@
-import 'package:flutter/material.dart';
+import 'example_material.dart';
 
 // ignore_for_file: depend_on_referenced_packages
 import 'package:amplitude_flutter/events/base_event.dart';

@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:amplitude_flutter/configuration.dart';
@@ -527,21 +528,69 @@ void main() {
       }
     });
 
-    test('all instances receive each transition once', () async {
-      final requests = <http.BaseRequest>[];
-      final backends = <DesktopBackend>[];
-      final source = FakeLifecycleSource();
-      final plugin = makeLifecyclePlugin(source, requests, backends);
-      try {
-        await call(plugin, 'init', initArgs(instance: 'a'));
-        await call(plugin, 'init', initArgs(instance: 'b'));
-        await plugin.handleLifecycleForTests(AppLifecycleState.hidden, 1000);
-        await plugin.handleLifecycleForTests(AppLifecycleState.resumed, 2000);
-        expect(backends, hasLength(2));
-      } finally {
-        await plugin.dispose();
-      }
-    });
+    test(
+      'a slow background upload cannot delay another instance resuming',
+      () async {
+        final uploadStarted = Completer<void>();
+        final releaseUpload = Completer<void>();
+        final plugin = DesktopAmplitudePlugin(
+          lifecycleSource: FakeLifecycleSource(),
+          backendFactory: () => DesktopBackend(
+            storage: InMemoryDesktopStorage(),
+            transport: DesktopTransport(
+              client: MockClient((request) async {
+                final uploads = decodeUpload(request)['events'] as List;
+                if (uploads.any((event) => event['event_type'] == 'slow')) {
+                  uploadStarted.complete();
+                  await releaseUpload.future;
+                }
+                return http.Response('{}', 200);
+              }),
+            ),
+          ),
+        );
+
+        final start = DateTime.now().millisecondsSinceEpoch;
+        final resumedAt = start + 5000;
+        final transitions = <Future<void>>[];
+        try {
+          for (final instance in ['slow', 'fast']) {
+            await call(plugin, 'init', {
+              ...initArgs(instance: instance),
+              'minTimeBetweenSessionsMillis': 1000,
+            });
+            await call(plugin, 'track', {
+              'instanceName': instance,
+              'event': {'event_type': instance, 'timestamp': start},
+            });
+          }
+          final fast = {'instanceName': 'fast'};
+          final firstSession = await call(plugin, 'getSessionId', fast);
+          expect(firstSession, start);
+
+          transitions.add(
+            plugin.handleLifecycleForTests(AppLifecycleState.hidden, start + 1),
+          );
+          await uploadStarted.future;
+          transitions.add(
+            plugin.handleLifecycleForTests(
+              AppLifecycleState.resumed,
+              resumedAt,
+            ),
+          );
+          await call(plugin, 'track', {
+            ...fast,
+            'event': {'event_type': 'after_resume', 'timestamp': resumedAt + 1},
+          });
+
+          expect(await call(plugin, 'getSessionId', fast), resumedAt);
+        } finally {
+          releaseUpload.complete();
+          await Future.wait(transitions);
+          await plugin.dispose();
+        }
+      },
+    );
 
     test(
       'init while hidden starts background; resume rotates past gap',

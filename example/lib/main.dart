@@ -1,5 +1,5 @@
 import 'package:flutter/foundation.dart' show kIsWeb;
-import 'package:flutter/material.dart';
+import 'example_material.dart';
 import 'package:flutter/semantics.dart';
 
 import 'my_app.dart';

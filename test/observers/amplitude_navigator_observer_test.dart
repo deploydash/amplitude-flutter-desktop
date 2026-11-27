@@ -2,6 +2,8 @@ import 'package:amplitude_flutter/amplitude.dart';
 import 'package:amplitude_flutter/autocapture/autocapture.dart';
 import 'package:amplitude_flutter/configuration.dart';
 import 'package:amplitude_flutter/observers/amplitude_navigator_observer.dart';
+// The navigation test runs on Flutter 3.38.1 as well as current stable.
+// ignore: deprecated_member_use
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:mockito/mockito.dart';

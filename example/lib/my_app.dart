@@ -8,7 +8,7 @@ import 'package:amplitude_flutter/autocapture/page_views.dart';
 import 'package:amplitude_flutter/configuration.dart';
 import 'package:amplitude_flutter/constants.dart';
 import 'package:amplitude_flutter/observers/amplitude_navigator_observer.dart';
-import 'package:flutter/material.dart';
+import 'example_material.dart';
 
 import 'app_state.dart';
 import 'device_id_form.dart';

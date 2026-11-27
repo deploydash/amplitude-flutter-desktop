@@ -206,18 +206,24 @@ class DesktopAmplitudePlugin {
           return;
         }
         _isForeground = true;
-        for (final backend in instances.values) {
-          await backend.onEnterForeground(timestampMs);
-        }
+        // Each backend queues its own transitions. Queue for every instance
+        // before awaiting I/O so a slow upload can't delay the next instance.
+        await Future.wait(
+          instances.values.map(
+            (backend) => backend.onEnterForeground(timestampMs),
+          ),
+        );
       case AppLifecycleState.hidden:
       case AppLifecycleState.paused:
         if (!_isForeground) {
           return;
         }
         _isForeground = false;
-        for (final backend in instances.values) {
-          await backend.onExitForeground(timestampMs);
-        }
+        await Future.wait(
+          instances.values.map(
+            (backend) => backend.onExitForeground(timestampMs),
+          ),
+        );
       case AppLifecycleState.inactive:
         // Visible but unfocused (alt-tab): never a session boundary.
         return;
@@ -226,9 +232,11 @@ class DesktopAmplitudePlugin {
         // decides whether the app may exit; the host owns that.
         _isForeground = false;
         _detached = true;
-        for (final backend in instances.values) {
-          await backend.onExitForeground(timestampMs);
-        }
+        await Future.wait(
+          instances.values.map(
+            (backend) => backend.onExitForeground(timestampMs),
+          ),
+        );
         _lifecycleSource?.stop();
     }
   }
