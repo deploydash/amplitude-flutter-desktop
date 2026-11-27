@@ -114,6 +114,26 @@ void main() {
     expect(requests, hasLength(1));
   });
 
+  test(
+    'desktop opt-out suppresses delivery without a channel handler',
+    () async {
+      debugDefaultTargetPlatformOverride = TargetPlatform.linux;
+      final amplitude = newAmplitude();
+      expect(await amplitude.isBuilt, isTrue);
+
+      await amplitude.setOptOut(true);
+      await amplitude.track(BaseEvent('opted_out'));
+      await amplitude.flush();
+      expect(requests, isEmpty);
+
+      await amplitude.setOptOut(false);
+      await amplitude.track(BaseEvent('opted_in'));
+      await amplitude.flush();
+      expect(requests, hasLength(1));
+      expect(channelCalls, 0);
+    },
+  );
+
   test('other platforms keep using the channel untouched', () async {
     debugDefaultTargetPlatformOverride = TargetPlatform.android;
     final amplitude = newAmplitude();

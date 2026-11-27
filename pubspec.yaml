@@ -31,6 +31,7 @@ dev_dependencies:
 
 flutter:
   plugin:
+    # Linux and Windows use the in-process Dart backend directly.
     platforms:
       android:
         package: com.amplitude.amplitude_flutter
@@ -38,15 +39,9 @@ flutter:
       ios:
         pluginClass: AmplitudeFlutterPlugin
         sharedDarwinSource: true
-      linux:
-        dartPluginClass: DesktopAmplitudePlugin
-        dartFileName: desktop/desktop_plugin.dart
       macos:
         pluginClass: AmplitudeFlutterPlugin
         sharedDarwinSource: true
-      windows:
-        dartPluginClass: DesktopAmplitudePlugin
-        dartFileName: desktop/desktop_plugin.dart
       web:
         pluginClass: AmplitudeFlutterPlugin
         fileName: amplitude_web.dart

@@ -111,12 +111,11 @@ Windows are served by the pure-Dart backend (no extra native toolchain).
 
 ## Desktop support (Linux / Windows)
 
-Linux and Windows are served by a pure-Dart backend under `lib/desktop/`
-(`DesktopAmplitudePlugin`, registered via `dartPluginClass`); macOS keeps
-using the shared Darwin backend. The public `Amplitude` API is unchanged —
-the same 14 channel methods work on desktop with no caller changes —
-lifecycle signals flow automatically through the plugin, while hosts own
-flush on close; see Host responsibilities below.
+On Linux and Windows, the public `Amplitude` API calls the pure-Dart
+backend under `lib/desktop/` directly. Those platforms require no
+Flutter plugin registration. macOS uses the shared Darwin backend.
+Lifecycle signals flow through the desktop backend, and hosts own
+flush on close. See Host responsibilities below.
 
 Unless noted below, behavior matches the Swift/Kotlin SDKs: upload
 batching and tuning, the 400/413 retry dispatch and whole-file ordered 429
