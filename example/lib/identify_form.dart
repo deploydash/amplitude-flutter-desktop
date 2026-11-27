@@ -1,6 +1,6 @@
 // ignore_for_file: depend_on_referenced_packages
 import 'package:amplitude_flutter/events/identify.dart';
-import 'package:flutter/material.dart';
+import 'example_material.dart';
 
 import 'app_state.dart';
 
