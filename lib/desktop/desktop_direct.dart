@@ -11,10 +11,10 @@ import 'package:flutter/services.dart';
 //
 // Contract (both variants): resolve with the backend result on desktop,
 // otherwise invoke [channel] exactly as before. No caller API changes.
-Future<dynamic> invokeDesktopMethod(
+Future<T?> invokeDesktopMethod<T>(
   MethodChannel channel,
   String method,
   dynamic arguments,
 ) {
-  return channel.invokeMethod(method, arguments);
+  return channel.invokeMethod<T>(method, arguments);
 }

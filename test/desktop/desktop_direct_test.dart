@@ -85,11 +85,11 @@ void main() {
       instanceName: 'direct-test',
       flushIntervalMillis: 3600000,
     ),
-    channel,
   );
 
-  test('linux routes in-process without touching the channel', () async {
-    debugDefaultTargetPlatformOverride = TargetPlatform.linux;
+  test('linux routes in-process despite UI overrides', () async {
+    desktop_direct.debugDirectOperatingSystem = 'linux';
+    debugDefaultTargetPlatformOverride = TargetPlatform.android;
     final amplitude = newAmplitude();
     expect(await amplitude.isBuilt, isTrue);
     await amplitude.track(BaseEvent('direct_event'));
@@ -104,7 +104,7 @@ void main() {
   });
 
   test('windows routes in-process without touching the channel', () async {
-    debugDefaultTargetPlatformOverride = TargetPlatform.windows;
+    desktop_direct.debugDirectOperatingSystem = 'windows';
     final amplitude = newAmplitude();
     expect(await amplitude.isBuilt, isTrue);
     await amplitude.track(BaseEvent('direct_event'));
@@ -117,7 +117,7 @@ void main() {
   test(
     'desktop opt-out suppresses delivery without a channel handler',
     () async {
-      debugDefaultTargetPlatformOverride = TargetPlatform.linux;
+      desktop_direct.debugDirectOperatingSystem = 'linux';
       final amplitude = newAmplitude();
       expect(await amplitude.isBuilt, isTrue);
 
@@ -134,8 +134,9 @@ void main() {
     },
   );
 
-  test('other platforms keep using the channel untouched', () async {
-    debugDefaultTargetPlatformOverride = TargetPlatform.android;
+  test('other platforms keep using the channel despite UI overrides', () async {
+    desktop_direct.debugDirectOperatingSystem = 'android';
+    debugDefaultTargetPlatformOverride = TargetPlatform.linux;
     final amplitude = newAmplitude();
     expect(await amplitude.isBuilt, isTrue);
     await amplitude.track(BaseEvent('channel_event'));
@@ -158,8 +159,10 @@ void main() {
       }
       return null;
     });
-    debugDefaultTargetPlatformOverride = TargetPlatform.linux;
     desktop_direct.debugDirectPluginFactory = null;
+    if (!Platform.isLinux && !Platform.isWindows) {
+      desktop_direct.debugDirectOperatingSystem = 'linux';
+    }
     try {
       final amplitude = newAmplitude();
       expect(await amplitude.isBuilt, isTrue);
