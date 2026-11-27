@@ -1,3 +1,5 @@
+import 'dart:io';
+
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 
@@ -20,6 +22,10 @@ import 'desktop_plugin.dart';
 @visibleForTesting
 DesktopAmplitudePlugin Function()? debugDirectPluginFactory;
 
+/// Test-only override for the host OS used by the in-process routing.
+@visibleForTesting
+String? debugDirectOperatingSystem;
+
 /// Process-wide direct plugin. One per process is correct: backends inside
 /// are keyed by instance name exactly like channel-served ones.
 DesktopAmplitudePlugin? _directPlugin;
@@ -30,16 +36,18 @@ DesktopAmplitudePlugin? _directPlugin;
 void resetDesktopDirectForTests() {
   _directPlugin = null;
   debugDirectPluginFactory = null;
+  debugDirectOperatingSystem = null;
 }
 
-Future<dynamic> invokeDesktopMethod(
+Future<T?> invokeDesktopMethod<T>(
   MethodChannel channel,
   String method,
   dynamic arguments,
-) {
-  if (defaultTargetPlatform != TargetPlatform.linux &&
-      defaultTargetPlatform != TargetPlatform.windows) {
-    return channel.invokeMethod(method, arguments);
+) async {
+  final operatingSystem =
+      debugDirectOperatingSystem ?? Platform.operatingSystem;
+  if (!const {'linux', 'windows'}.contains(operatingSystem)) {
+    return channel.invokeMethod<T>(method, arguments);
   }
   final custom = debugDirectPluginFactory;
   _directPlugin ??= custom != null
@@ -47,5 +55,8 @@ Future<dynamic> invokeDesktopMethod(
       : DesktopAmplitudePlugin(
           lifecycleSource: WidgetsBindingLifecycleSource(),
         );
-  return _directPlugin!.handleMethodCall(MethodCall(method, arguments));
+  final result = await _directPlugin!.handleMethodCall(
+    MethodCall(method, arguments),
+  );
+  return result as T?;
 }

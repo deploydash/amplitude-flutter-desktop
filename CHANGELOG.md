@@ -3,7 +3,7 @@
 ### Features
 
 * **desktop:** pure-Dart Linux/Windows backend speaking HTTP ingestion
-  directly (`lib/desktop/`, `DesktopAmplitudePlugin` via `dartPluginClass`).
+  directly through the in-process Dart backend (`lib/desktop/`).
   Same 14-method channel API, batched upload (30 events / 30 s), crash-safe
   filesystem queue with quarantine and one-time legacy migration, persisted
   identity/sessions, `$identify` batching, automatic Flutter lifecycle
@@ -12,6 +12,47 @@
 * **desktop:** Linux/Windows support requires Dart `>=3.10.0 <4.0.0` and
   Flutter `>=3.38.1` (the effective floor of its `device_info_plus`,
   `package_info_plus`, and `path_provider` dependencies).
+
+# [4.9.0](https://github.com/amplitude/Amplitude-Flutter/compare/v4.8.2...v4.9.0) (2026-11-25)
+
+
+### Bug Fixes
+
+* **ios:** apply Configuration.deviceId on init ([#313](https://github.com/amplitude/Amplitude-Flutter/issues/313)) ([2e6167a](https://github.com/amplitude/Amplitude-Flutter/commit/2e6167a505347e71456761e6ad4c0cf16f82c70d))
+* use the configured server zone for remote config and diagnostics on iOS and macOS ([#343](https://github.com/amplitude/Amplitude-Flutter/issues/343)) ([0278d8f](https://github.com/amplitude/Amplitude-Flutter/commit/0278d8ff3e1f8b6c32e1211d46cb31c60d7e09a5))
+
+
+### Features
+
+* **autocapture:** identify the control each tap hit ([#333](https://github.com/amplitude/Amplitude-Flutter/issues/333)) ([85f4384](https://github.com/amplitude/Amplitude-Flutter/commit/85f4384ed5117b54c3c51e512a90efaa557766d2)), closes [#341](https://github.com/amplitude/Amplitude-Flutter/issues/341) [#317](https://github.com/amplitude/Amplitude-Flutter/issues/317) [#317](https://github.com/amplitude/Amplitude-Flutter/issues/317) [#317](https://github.com/amplitude/Amplitude-Flutter/issues/317)
+* **autocapture:** log taps on controls on iOS and Android ([#332](https://github.com/amplitude/Amplitude-Flutter/issues/332)) ([ea62d17](https://github.com/amplitude/Amplitude-Flutter/commit/ea62d170f51eea245e3fe51cecc95a3ac56a51e5))
+* **autocapture:** send element interaction events on iOS and Android ([#336](https://github.com/amplitude/Amplitude-Flutter/issues/336)) ([e6b3259](https://github.com/amplitude/Amplitude-Flutter/commit/e6b3259237928ab97dd674b47f91685784419ab5))
+
+## [4.8.2](https://github.com/amplitude/Amplitude-Flutter/compare/v4.8.1...v4.8.2) (2026-11-03)
+
+
+### Bug Fixes
+
+* **android:** preserve 64-bit event values and configuration durations ([#330](https://github.com/amplitude/Amplitude-Flutter/issues/330)) ([6f20e8d](https://github.com/amplitude/Amplitude-Flutter/commit/6f20e8db09098b5ef58487bd6e1f3fd860eefaee))
+
+## [4.8.1](https://github.com/amplitude/Amplitude-Flutter/compare/v4.8.0...v4.8.1) (2026-10-21)
+
+
+### Bug Fixes
+
+* **android:** skip kotlin-android when AGP provides built-in Kotlin ([#326](https://github.com/amplitude/Amplitude-Flutter/issues/326)) ([4f9f6aa](https://github.com/amplitude/Amplitude-Flutter/commit/4f9f6aa226c59afc5caef987f0c38acfd4c2bac3)), closes [#306](https://github.com/amplitude/Amplitude-Flutter/issues/306)
+
+# [4.8.0](https://github.com/amplitude/Amplitude-Flutter/compare/v4.7.3...v4.8.0) (2026-10-20)
+
+
+### Bug Fixes
+
+* make isBuilt reflect platform initialization ([#324](https://github.com/amplitude/Amplitude-Flutter/issues/324)) ([c164c1c](https://github.com/amplitude/Amplitude-Flutter/commit/c164c1c16d69511e340cc6188185e87d613d51cf))
+
+
+### Features
+
+* **android:** support API 36 with updated build tooling ([#320](https://github.com/amplitude/Amplitude-Flutter/issues/320)) ([ef0ed06](https://github.com/amplitude/Amplitude-Flutter/commit/ef0ed0636ad06d6b9139d2ebd24f3b3808ef2395))
 
 ## [4.7.3](https://github.com/amplitude/Amplitude-Flutter/compare/v4.7.2...v4.7.3) (2026-10-05)
 

@@ -11,12 +11,25 @@ import 'events/revenue.dart';
 import 'configuration.dart';
 import 'events/base_event.dart';
 import 'events/group_identify_event.dart';
+import 'src/interaction/flutter_element_interactions.dart';
+import 'src/interaction/observed_routes.dart';
 
 class Amplitude {
   Configuration configuration;
-  MethodChannel _channel = const MethodChannel('amplitude_flutter');
+  final MethodChannel? _channel;
+  FlutterElementInteractions? _elementInteractions;
 
-  /// Whether the Amplitude instance has been successfully initialized
+  /// Whether the platform SDK has completed initialization successfully.
+  ///
+  /// Remains pending during initialization and resolves to false if the platform
+  /// reports an initialization error. Android waits for the native SDK's build,
+  /// web waits for the Browser SDK's initialization promise and resolves to
+  /// false after 10 seconds if it never settles (for example, when the SDK
+  /// script is blocked), and iOS/macOS reply after the Swift SDK's constructor
+  /// and initial setup complete.
+  ///
+  /// Analytics calls can be submitted while initialization is pending. Readiness
+  /// does not establish that an event has been persisted or uploaded.
   ///
   /// ```
   /// var amplitude = Amplitude(Configuration(apiKey: 'apiKey'));
@@ -32,22 +45,37 @@ class Amplitude {
   /// // If care about init complete
   /// await amplitude.isBuilt;
   /// ```
-  Amplitude(this.configuration, [MethodChannel? methodChannel]) {
-    _channel = methodChannel ?? _channel;
+  Amplitude(this.configuration, [this._channel]) {
     isBuilt = _init();
+    _elementInteractions = FlutterElementInteractions.register(
+      configuration,
+      isBuilt: isBuilt,
+      track: track,
+      routes: () => observedRoutes[this],
+    );
+    // AmplitudeNavigatorObserver keeps routes only for an instance that
+    // captures taps.
+    if (_elementInteractions != null) observedRoutes[this] = ObservedRoutes();
   }
 
   /// Sends one API call: directly to the in-process desktop backend on
   /// Linux/Windows, over the engine channel everywhere else. Arguments and
   /// results keep the 14-method channel shape either way.
-  Future<dynamic> _invoke(String method, [dynamic arguments]) {
-    return desktop_direct.invokeDesktopMethod(_channel, method, arguments);
+  Future<T?> _invoke<T>(String method, [dynamic arguments]) {
+    if (_channel case final channel?) {
+      return channel.invokeMethod<T>(method, arguments);
+    }
+    return desktop_direct.invokeDesktopMethod<T>(
+      const MethodChannel('amplitude_flutter'),
+      method,
+      arguments,
+    );
   }
 
   /// Private method to initialize and return a `Future<bool>`
   Future<bool> _init() async {
     try {
-      await _invoke('init', configuration.toMap());
+      await _invoke<void>('init', configuration.toMap());
       return true; // Initialization successful
     } catch (e) {
       print('Error initializing Amplitude: $e');
@@ -281,7 +309,12 @@ class Amplitude {
   ///
   /// Set setOptOut to true to disable logging for a specific user.
   /// Set setOptOut to false to re-enable logging.
+  ///
+  /// Also updates [Configuration.optOut], as the iOS and Android SDKs'
+  /// optOut setters update their configuration.
   Future<void> setOptOut(bool enabled) async {
+    configuration.optOut = enabled;
+    _elementInteractions?.setOptOut(enabled);
     Map<String, bool> properties = {};
     properties['setOptOut'] = enabled;
 

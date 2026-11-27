@@ -1,3 +1,4 @@
+import 'package:amplitude_flutter/constants.dart';
 import 'package:amplitude_flutter/desktop/desktop_enricher.dart';
 import 'package:amplitude_flutter/desktop/desktop_system_info.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -25,10 +26,7 @@ const testOs = DesktopOsInfo(
   deviceModel: 'Ubuntu',
   deviceManufacturer: null,
 );
-const testApp = DesktopAppVersion(
-  appVersion: '1.2.3',
-  versionName: '1.2.3',
-);
+const testApp = DesktopAppVersion(appVersion: '1.2.3', versionName: '1.2.3');
 
 Map<String, dynamic> enrich(
   Map<String, dynamic> event, {
@@ -75,13 +73,12 @@ void main() {
     test('rewrites camelCase ingestion metadata to snake_case', () {
       final out = translateDesktopEvent({
         'event_type': 'x',
-        'ingestion_metadata': {
-          'sourceName': 'ampli',
-          'sourceVersion': '2.0',
-        },
+        'ingestion_metadata': {'sourceName': 'ampli', 'sourceVersion': '2.0'},
       });
-      expect(out['ingestion_metadata'],
-          {'source_name': 'ampli', 'source_version': '2.0'});
+      expect(out['ingestion_metadata'], {
+        'source_name': 'ampli',
+        'source_version': '2.0',
+      });
     });
 
     test('drops android ids silently even when explicitly set', () {
@@ -151,22 +148,33 @@ void main() {
 
     test('disabled IP tracking removes explicit and default IP', () {
       expect(
-          enrich({'event_type': 'x', 'ip': '1.2.3.4'},
-              tracking: const {'ipAddress': false}).containsKey('ip'),
-          isFalse);
+        enrich(
+          {'event_type': 'x', 'ip': '1.2.3.4'},
+          tracking: const {'ipAddress': false},
+        ).containsKey('ip'),
+        isFalse,
+      );
       expect(
-          enrich({'event_type': 'x'},
-              tracking: const {'ipAddress': false}).containsKey('ip'),
-          isFalse);
+        enrich(
+          {'event_type': 'x'},
+          tracking: const {'ipAddress': false},
+        ).containsKey('ip'),
+        isFalse,
+      );
     });
 
     test('coppa removes explicit and default IP', () {
       expect(
-          enrich({'event_type': 'x', 'ip': '1.2.3.4'}, coppa: true)
-              .containsKey('ip'),
-          isFalse);
+        enrich({
+          'event_type': 'x',
+          'ip': '1.2.3.4',
+        }, coppa: true).containsKey('ip'),
+        isFalse,
+      );
       expect(
-          enrich({'event_type': 'x'}, coppa: true).containsKey('ip'), isFalse);
+        enrich({'event_type': 'x'}, coppa: true).containsKey('ip'),
+        isFalse,
+      );
     });
 
     test('host values survive when the SDK has nothing to stamp', () {
@@ -229,18 +237,15 @@ void main() {
     });
 
     test('coppa drops idfa, idfv, city, ip, and location', () {
-      final out = enrich(
-        {
-          'event_type': 'x',
-          'idfa': 'idfa-1',
-          'idfv': 'idfv-1',
-          'city': 'Springfield',
-          'ip': '1.2.3.4',
-          'location_lat': 12.5,
-          'location_lng': 3.5,
-        },
-        coppa: true,
-      );
+      final out = enrich({
+        'event_type': 'x',
+        'idfa': 'idfa-1',
+        'idfv': 'idfv-1',
+        'city': 'Springfield',
+        'ip': '1.2.3.4',
+        'location_lat': 12.5,
+        'location_lng': 3.5,
+      }, coppa: true);
       for (final key in [
         'idfa',
         'idfv',
@@ -256,23 +261,29 @@ void main() {
     test('idfv flag gates explicit idfv', () {
       expect(enrich({'event_type': 'x', 'idfv': 'v'})['idfv'], 'v');
       expect(
-          enrich({'event_type': 'x', 'idfv': 'v'},
-              tracking: const {'idfv': false}).containsKey('idfv'),
-          isFalse);
+        enrich(
+          {'event_type': 'x', 'idfv': 'v'},
+          tracking: const {'idfv': false},
+        ).containsKey('idfv'),
+        isFalse,
+      );
     });
 
     test('adid flag gates explicit adid', () {
       expect(enrich({'event_type': 'x', 'adid': 'a'})['adid'], 'a');
       expect(
-          enrich({'event_type': 'x', 'adid': 'a'},
-              tracking: const {'adid': false}).containsKey('adid'),
-          isFalse);
+        enrich(
+          {'event_type': 'x', 'adid': 'a'},
+          tracking: const {'adid': false},
+        ).containsKey('adid'),
+        isFalse,
+      );
     });
   });
 
   group('desktopLibrary', () {
     test('matches the native library format', () {
-      expect(desktopLibrary(), 'amplitude-flutter/4.7.3');
+      expect(desktopLibrary(), 'amplitude-flutter/${Constants.packageVersion}');
     });
   });
 }
