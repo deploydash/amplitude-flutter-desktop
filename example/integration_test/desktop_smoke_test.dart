@@ -4,6 +4,7 @@ import 'dart:io';
 import 'package:amplitude_flutter/amplitude.dart';
 import 'package:amplitude_flutter/configuration.dart';
 import 'package:amplitude_flutter/events/base_event.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:integration_test/integration_test.dart';
@@ -98,7 +99,12 @@ Future<Amplitude> _init(
 }
 
 void main() {
-  IntegrationTestWidgetsFlutterBinding.ensureInitialized();
+  final binding = IntegrationTestWidgetsFlutterBinding.ensureInitialized();
+  // The native runner's window manager can send focus or visibility events
+  // between scripted transitions, particularly under Xvfb. Drive the real
+  // binding and its SDK observers from one source for this test process.
+  SystemChannels.lifecycle.setMessageHandler((_) async => null);
+  binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
 
   late _Collector collector;
   late String serverUrl;
@@ -190,15 +196,9 @@ void main() {
     await amplitude.track(BaseEvent('before'));
     final first = await amplitude.getSessionId();
 
-    WidgetsBinding.instance.handleAppLifecycleStateChanged(
-      AppLifecycleState.hidden,
-    );
-    await tester.pump();
+    binding.handleAppLifecycleStateChanged(AppLifecycleState.hidden);
     await Future<void>.delayed(const Duration(milliseconds: 1500));
-    WidgetsBinding.instance.handleAppLifecycleStateChanged(
-      AppLifecycleState.resumed,
-    );
-    await tester.pump();
+    binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
     await amplitude.track(BaseEvent('after'));
 
     expect(await amplitude.getSessionId(), isNot(first));
